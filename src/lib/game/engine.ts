@@ -1,10 +1,11 @@
 import type {
-  Affix, ActiveBuff, Consumable, ConsumableStack,
+  Affix, ActiveBuff, ActiveRun, Consumable, ConsumableStack,
   Difficulty, DungeonDef, GameEvent, Item, Monster, Player,
-  QuestDef, QuestObjective, QuestState, RoomState, Tier, TraderDef,
+  QuestDef, QuestObjective, QuestState, RoomState, SkillCooldown,
+  SkillNode, Tier, TraderDef,
 } from "./types";
-import { DIFFICULTY_ORDER, TIER_ORDER, TIER_VALUE } from "./types";
-import { AFFIX_POOL, CONSUMABLES, DUNGEONS, ITEMS, MONSTERS } from "./data";
+import { DIFFICULTY_ORDER, MANA_REGEN_PCT, TIER_ORDER, TIER_VALUE } from "./types";
+import { AFFIX_POOL, CONSUMABLES, DUNGEONS, ITEMS, MONSTERS, SKILL_TREE } from "./data";
 
 export const rand = (min: number, max: number) => Math.random() * (max - min) + min;
 export const randInt = (min: number, max: number) => Math.floor(rand(min, max + 1));
@@ -242,12 +243,13 @@ export function tryLevelUp(player: Player, log?: (s: string) => void): Player {
     p.xp -= p.xpToNext;
     p.level += 1;
     p.unspentPoints += 3;
+    p.skillPoints += 1;
     p.maxHp += 12;
     p.maxMana += 6;
     p.hp = p.maxHp;
     p.mana = p.maxMana;
     p.xpToNext = xpToNext(p.level);
-    log?.(`✦ Level Up! You are now level ${p.level}. +3 stat points.`);
+    log?.(`✦ Level Up! You are now level ${p.level}. +3 stat points, +1 Skill Point.`);
   }
   // Keep any "reach_level" quest objectives in sync with the player's
   // current level — every code path that grants XP funnels through here,
@@ -693,4 +695,220 @@ export function statCheckChance(playerStat: number, diff: Difficulty): number {
   if (needed > 20) return 0;
   const successRolls = 20 - needed + 1;
   return Math.round((successRolls / 20) * 100);
+}
+
+// ============ SKILLS: RANKS, COOLDOWNS, REGEN, PREVIEW ============
+
+/**
+ * Per-turn mana regeneration applied at the end of the player's combat
+ * action (matches where `tickBuffs` already fires). Floors at +1 so even
+ * the L1 caster with maxMana = 30 actually gets a tick.
+ * Combat-only by design: out-of-combat the Inn / Mercy Cot handle it.
+ */
+export function regenMana(p: Player): Player {
+  if (p.mana >= p.maxMana) return p;
+  const tick = Math.max(1, Math.round(p.maxMana * MANA_REGEN_PCT));
+  return { ...p, mana: Math.min(p.maxMana, p.mana + tick) };
+}
+
+export function tickCooldowns(run: ActiveRun): ActiveRun {
+  if (!run.cooldowns || run.cooldowns.length === 0) return run;
+  const next = run.cooldowns
+    .map((cd) => ({ ...cd, turnsRemaining: cd.turnsRemaining - 1 }))
+    .filter((cd) => cd.turnsRemaining > 0);
+  return { ...run, cooldowns: next };
+}
+
+export function cooldownOf(run: ActiveRun, skillId: string): number {
+  return run.cooldowns?.find((cd) => cd.skillId === skillId)?.turnsRemaining ?? 0;
+}
+
+export function startCooldown(run: ActiveRun, skillId: string, turns: number): ActiveRun {
+  const filtered = (run.cooldowns ?? []).filter((cd) => cd.skillId !== skillId);
+  if (turns <= 0) return { ...run, cooldowns: filtered };
+  return { ...run, cooldowns: [...filtered, { skillId, turnsRemaining: turns }] };
+}
+
+/** Look up a SkillNode by id. Returns undefined if not in the tree. */
+export function findSkill(skillId: string): SkillNode | undefined {
+  return SKILL_TREE.find((s) => s.id === skillId);
+}
+
+/**
+ * Derived per-rank statistics for a skill at a specific rank (1..maxRank).
+ * Rank 0 (locked) is allowed for tooltip "Next Rank" previews but clamps
+ * to rank-1 magnitudes internally so the consumer can show "would be".
+ */
+export interface RankedSkillStats {
+  rank: number;             // the rank these stats describe
+  manaCost: number;
+  magnitude: number;        // damage multiplier OR fraction of maxHp OR shield value, depending on effect.kind
+  scalingPct: number;       // % of the scaling stat used (0 if no scaling)
+}
+
+export function skillStatsAtRank(node: SkillNode, rank: number): RankedSkillStats {
+  const r = Math.max(1, rank);
+  const stepsAbove = r - 1;
+  const manaCost = node.baseManaCost + node.manaCostPerRank * stepsAbove;
+  const magnitude = node.effect.baseMagnitude + node.effect.magnitudePerRank * stepsAbove;
+  const scalingPct = node.effect.scaling
+    ? node.effect.scaling.basePct + node.effect.scaling.pctPerRank * stepsAbove
+    : 0;
+  return { rank: r, manaCost, magnitude, scalingPct };
+}
+
+/**
+ * Preview the concrete numbers a skill would produce for THIS player at
+ * THIS rank — used by tooltips, the trainer's "Next Rank" callout, and
+ * the action bar labels. Damage previews assume average variance (1.2)
+ * and ignore the target's defense so the displayed number is a clean
+ * "your hit floor against an undefended target".
+ */
+export interface SkillPreview {
+  rank: number;
+  manaCost: number;
+  cooldown: number;
+  // damage: average expected, plus min/max from the same variance band as combat
+  damage: number;
+  damageMin: number;
+  damageMax: number;
+  heal: number;
+  shield: number;
+  buffText?: string;
+  scalingText?: string;     // "Deals 150% of STR as damage"
+}
+
+export function previewSkill(player: Player, node: SkillNode, rank: number): SkillPreview {
+  const s = computeStats(player);
+  const r = skillStatsAtRank(node, rank);
+  const out: SkillPreview = {
+    rank: r.rank,
+    manaCost: r.manaCost,
+    cooldown: node.cooldown,
+    damage: 0, damageMin: 0, damageMax: 0,
+    heal: 0, shield: 0,
+  };
+
+  if (node.effect.kind === "damage" && node.effect.scaling) {
+    const stat = node.effect.scaling.stat;
+    const statVal = stat === "weaponPower" ? s.weaponPower : (s as any)[stat] ?? 0;
+    const fireMult = 1 + (s.fireBonus ?? 0) / 100;
+    const base = (s.weaponPower + statVal) * (r.scalingPct / 100);
+    out.damage = Math.round(base * 1.20 * fireMult);
+    out.damageMin = Math.round(base * 1.10 * fireMult);
+    out.damageMax = Math.round(base * 1.30 * fireMult);
+    out.scalingText = `Deals ${r.scalingPct}% of ${stat.toUpperCase()} as damage`;
+  } else if (node.effect.kind === "heal") {
+    out.heal = Math.round(player.maxHp * r.magnitude);
+    out.scalingText = `Restores ${Math.round(r.magnitude * 100)}% of Max HP`;
+  } else if (node.effect.kind === "shield") {
+    out.shield = Math.round(r.magnitude);
+    out.scalingText = `Absorbs ${out.shield} damage`;
+  } else if (node.effect.kind === "buff_stat") {
+    const dur = node.effect.duration ?? 3;
+    out.buffText = `+${Math.round(r.magnitude)} ${(node.effect.buffKind ?? "stat").replace("buff_","").toUpperCase()} for ${dur} turns`;
+    out.scalingText = out.buffText;
+  }
+  return out;
+}
+
+export interface SkillUseResult {
+  damage: number;
+  crit: boolean;
+  lifesteal: number;
+  heal: number;
+  buff?: ActiveBuff;
+  log: string;
+}
+
+/**
+ * Resolve a skill use against a target. Pure: returns the numbers and the
+ * log line; mutating the player/run is the caller's job. Mirrors
+ * playerAttack's pipeline (variance, crit, lifesteal, fire mult, defense).
+ */
+export function applySkill(player: Player, target: Monster | null, node: SkillNode, rank: number): SkillUseResult {
+  const s = computeStats(player);
+  const r = skillStatsAtRank(node, rank);
+  const out: SkillUseResult = {
+    damage: 0, crit: false, lifesteal: 0, heal: 0,
+    log: `You use ${node.name} (Rank ${r.rank}).`,
+  };
+
+  if (node.effect.kind === "damage" && node.effect.scaling && target) {
+    const stat = node.effect.scaling.stat;
+    const statVal = stat === "weaponPower" ? s.weaponPower : (s as any)[stat] ?? 0;
+    const variance = 1 + rand(0.1, 0.3);
+    const fireMult = 1 + (s.fireBonus ?? 0) / 100;
+    let dmg = Math.max(
+      1,
+      Math.round((s.weaponPower + statVal) * (r.scalingPct / 100) * variance * fireMult) - target.defense,
+    );
+    const crit = Math.random() * 100 < s.critChance;
+    if (crit) dmg = Math.round(dmg * 1.8);
+    const lifesteal = Math.round((dmg * s.lifesteal) / 100);
+    out.damage = dmg;
+    out.crit = crit;
+    out.lifesteal = lifesteal;
+    out.log = crit
+      ? `Your ${node.name} bursts with brilliance for ${dmg} damage!`
+      : `Your ${node.name} lands for ${dmg} damage.`;
+  } else if (node.effect.kind === "heal") {
+    out.heal = Math.round(player.maxHp * r.magnitude);
+    out.log = `You channel ${node.name} — restored ${out.heal} HP.`;
+  } else if (node.effect.kind === "shield") {
+    out.buff = {
+      source: node.name,
+      kind: "shield",
+      magnitude: Math.round(r.magnitude),
+      turnsLeft: node.effect.duration ?? 99,
+    };
+    out.log = `${node.name} envelops you — ${out.buff.magnitude} damage shielded.`;
+  } else if (node.effect.kind === "buff_stat" && node.effect.buffKind) {
+    out.buff = {
+      source: node.name,
+      kind: node.effect.buffKind,
+      magnitude: Math.round(r.magnitude),
+      turnsLeft: node.effect.duration ?? 3,
+    };
+    out.log = `${node.name} surges through you.`;
+  }
+  return out;
+}
+
+/**
+ * Total SP currently sunk into the player's skill ranks — used to compute
+ * the respec refund. Sums rankCosts[0..rank-1] for every owned skill.
+ */
+export function totalSpentSP(player: Player): number {
+  let total = 0;
+  for (const [skillId, rank] of Object.entries(player.skillRanks ?? {})) {
+    const node = findSkill(skillId);
+    if (!node) continue;
+    for (let i = 0; i < Math.min(rank, node.rankCosts.length); i++) {
+      total += node.rankCosts[i];
+    }
+  }
+  return total;
+}
+
+/**
+ * Can the player learn / rank up this skill right now?
+ * Returns the reason it's blocked (or null if allowed) so the UI can
+ * surface the same gating rules without duplicating the logic.
+ */
+export function skillRankUpBlocker(player: Player, node: SkillNode): string | null {
+  const currentRank = player.skillRanks?.[node.id] ?? 0;
+  if (currentRank >= node.maxRank) return "Already at max rank.";
+  const cost = node.rankCosts[currentRank];
+  if (player.skillPoints < cost) return `Need ${cost} SP (have ${player.skillPoints}).`;
+  if (currentRank === 0) {
+    for (const req of node.requires) {
+      const reqRank = player.skillRanks?.[req] ?? 0;
+      if (reqRank < 1) {
+        const reqNode = findSkill(req);
+        return `Requires ${reqNode?.name ?? req} (unlock first).`;
+      }
+    }
+  }
+  return null;
 }

@@ -3,16 +3,16 @@ import type {
   ActiveRun, CharClass, Consumable, GameEvent, Item, Player, QuestDef,
   QuestState, SaveData, Slot, Tier, TraderState,
 } from "./types";
-import { SAVE_VERSION, TIER_VALUE } from "./types";
+import { MAX_EQUIPPED_SKILLS, SAVE_VERSION, SKILL_RESPEC_GOLD_PER_SP, TIER_VALUE } from "./types";
 import {
   ACHIEVEMENTS, CONSUMABLES, DUNGEONS, ITEMS,
-  QUESTS, STARTER_KITS, TRADERS,
+  QUESTS, SKILL_TREE, STARTER_KITS, TRADERS,
 } from "./data";
 import {
   addConsumable, applyConsumable, buildRooms, computeStats,
-  consumeShield, DIFF_INDEX, generateItem, generateTraderStock, makeQuestState,
+  consumeShield, DIFF_INDEX, findSkill, generateItem, generateTraderStock, makeQuestState,
   powerScore, randInt, reconcileLevelQuests, recomputeUnlocks, recordDungeonClear,
-  rollTier, shardsForTier, templateIdOf,
+  rollTier, shardsForTier, skillRankUpBlocker, templateIdOf, totalSpentSP,
   traderXpToNext, tryLevelUp, uid, updateQuestProgress,
   upgradeChance, upgradeCost, xpToNext,
 } from "./engine";
@@ -45,6 +45,17 @@ function freshTraders(): Record<string, TraderState> {
   return out;
 }
 
+// Seed a brand-new character with their class's tier-1 skills at rank 1
+// and auto-equip them to the action bar. Means a new (or hardcore-reset)
+// character is never empty-handed in combat — they always have at least
+// one offensive and one utility skill ready to go.
+function starterSkillsFor(cls: CharClass): { ranks: Record<string, number>; equipped: string[] } {
+  const tierOne = SKILL_TREE.filter(s => s.charClass === cls && s.position.tier === 1);
+  const ranks: Record<string, number> = {};
+  for (const node of tierOne) ranks[node.id] = 1;
+  return { ranks, equipped: tierOne.map(n => n.id) };
+}
+
 function freshPlayer(name: string, charClass: CharClass, hardcore: boolean, prestige = 0): Player {
   const kit = STARTER_KITS[charClass].map((id) => {
     const base = ITEMS.find((i) => i.id === id)!;
@@ -53,6 +64,7 @@ function freshPlayer(name: string, charClass: CharClass, hardcore: boolean, pres
   const equipped: Player["equipped"] = {};
   for (const it of kit) equipped[it.slot] = it;
   const prestigeBonus = prestige * 2;
+  const skills = starterSkillsFor(charClass);
   const player: Player = {
     name, charClass,
     level: 1, xp: 0, xpToNext: xpToNext(1),
@@ -78,11 +90,11 @@ function freshPlayer(name: string, charClass: CharClass, hardcore: boolean, pres
     pity: 0,
     prestige,
     hardcore,
-    // Fresh players have not cleared any dungeon yet — only Novice is
-    // selectable for d_thicket until they clear it.
     dungeonProgress: {},
+    skillPoints: 0,
+    skillRanks: skills.ranks,
+    equippedSkills: skills.equipped,
   };
-  // Ensure starting "reach_level" quests already reflect the player's level.
   return reconcileLevelQuests(player);
 }
 
@@ -108,10 +120,29 @@ function migrateSave(raw: unknown): SaveData | null {
     for (const did of unlockedDungeons) dungeonProgress[did] = "Nightmare";
   }
 
-  // Build a forward-compatible Player from any prior schema
+  // SAVE_VERSION 5 (Skill Trees). Legacy saves had no skill state. To avoid
+  // punishing returning players we:
+  //   • Retro-grant 1 SP per level above 1 (their level-ups would have
+  //     earned them anyway).
+  //   • Seed the player's tier-1 class skills at rank 1 so combat is not
+  //     blank on the very next turn (matches the freshPlayer contract).
+  //   • Auto-equip those starter skills to the action bar.
+  const isPreSkills = typeof data.version !== "number" || data.version < 5;
+  const charClassForMigration: CharClass = p.charClass ?? "warrior";
+  let skillPoints: number = typeof p.skillPoints === "number" ? p.skillPoints : 0;
+  let skillRanks: Record<string, number> = (p.skillRanks && typeof p.skillRanks === "object") ? { ...p.skillRanks } : {};
+  let equippedSkills: string[] = Array.isArray(p.equippedSkills) ? [...p.equippedSkills] : [];
+  if (isPreSkills) {
+    const level = p.level ?? 1;
+    skillPoints = Math.max(0, level - 1);
+    const starters = starterSkillsFor(charClassForMigration);
+    skillRanks = { ...starters.ranks };
+    equippedSkills = [...starters.equipped];
+  }
+
   const player: Player = {
     name: p.name ?? "Aether Warden",
-    charClass: p.charClass ?? "warrior",
+    charClass: charClassForMigration,
     level: p.level ?? 1,
     xp: p.xp ?? 0,
     xpToNext: p.xpToNext ?? xpToNext(p.level ?? 1),
@@ -140,6 +171,9 @@ function migrateSave(raw: unknown): SaveData | null {
     hardcore: !!p.hardcore,
     lastDailyClaim: p.lastDailyClaim,
     dungeonProgress,
+    skillPoints,
+    skillRanks,
+    equippedSkills,
   };
   // Seed starter quests if migrating from a save that didn't have them
   if (player.activeQuests.length === 0) {
@@ -185,6 +219,7 @@ function migrateSave(raw: unknown): SaveData | null {
       carriedXp: ar.carriedXp ?? 0,
       carriedLoot: Array.isArray(ar.carriedLoot) ? ar.carriedLoot : [],
       log: Array.isArray(ar.log) ? ar.log : [],
+      cooldowns: Array.isArray(ar.cooldowns) ? ar.cooldowns : [],
     };
   }
   return {
@@ -247,6 +282,11 @@ interface GameContextValue {
   useConsumableInCombat: (consumableId: string) => string | null;
   // quests
   turnInQuest: (questId: string) => void;
+  // skills
+  learnOrRankUpSkill: (skillId: string) => void;
+  equipSkill: (skillId: string) => void;
+  unequipSkill: (skillId: string) => void;
+  resetSkills: () => void;
   // ngp
   startNewGamePlus: () => void;
   power: number;
@@ -481,6 +521,9 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       // rooms (see DungeonScreen.onResolve).
       carriedGold: 0, carriedXp: 0, carriedLoot: [],
       log: [`You enter ${d.name} (${diff}).`],
+      // Fresh run = fresh cooldowns. Per design: every new dungeon run
+      // begins with 0 active cooldowns regardless of how the last one ended.
+      cooldowns: [],
     });
   }, [setActiveRun]);
 
@@ -951,6 +994,101 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     });
   }, []);
 
+  // ============ SKILLS ============
+  // Single entry point for both initial unlock (rank 0 → 1) and rank-up
+  // (rank N → N+1). The blocker-check is centralized in engine.skillRankUpBlocker
+  // so the Trainer UI and the store apply the exact same gating rules.
+  const learnOrRankUpSkill = useCallback((skillId: string) => {
+    setPlayer((p) => {
+      const node = SKILL_TREE.find((n) => n.id === skillId);
+      if (!node) return p;
+      if (node.charClass !== p.charClass) {
+        queueMicrotask(() => toast.error("That skill is not for your class."));
+        return p;
+      }
+      const blocker = skillRankUpBlocker(p, node);
+      if (blocker) {
+        queueMicrotask(() => toast.error(blocker));
+        return p;
+      }
+      const currentRank = p.skillRanks?.[node.id] ?? 0;
+      const cost = node.rankCosts[currentRank];
+      const newRank = currentRank + 1;
+      const wasUnlock = currentRank === 0;
+      queueMicrotask(() => toast.success(
+        wasUnlock ? `✦ Learned ${node.name} (Rank 1)` : `✦ ${node.name} → Rank ${newRank}`,
+      ));
+      return {
+        ...p,
+        skillPoints: p.skillPoints - cost,
+        skillRanks: { ...p.skillRanks, [node.id]: newRank },
+      };
+    });
+  }, [setPlayer]);
+
+  const equipSkill = useCallback((skillId: string) => {
+    setPlayer((p) => {
+      // Block edits during a run — players cannot swap mid-delve. This
+      // mirrors the "can't change loadout mid-fight" rule from the design.
+      if (save?.activeRun) {
+        queueMicrotask(() => toast.error("You cannot change your action bar mid-delve."));
+        return p;
+      }
+      const rank = p.skillRanks?.[skillId] ?? 0;
+      if (rank < 1) {
+        queueMicrotask(() => toast.error("Unlock that skill first."));
+        return p;
+      }
+      if (p.equippedSkills.includes(skillId)) return p;
+      if (p.equippedSkills.length >= MAX_EQUIPPED_SKILLS) {
+        queueMicrotask(() => toast.error(`Action bar full — max ${MAX_EQUIPPED_SKILLS} skills.`));
+        return p;
+      }
+      return { ...p, equippedSkills: [...p.equippedSkills, skillId] };
+    });
+  }, [setPlayer, save?.activeRun]);
+
+  const unequipSkill = useCallback((skillId: string) => {
+    setPlayer((p) => {
+      if (save?.activeRun) {
+        queueMicrotask(() => toast.error("You cannot change your action bar mid-delve."));
+        return p;
+      }
+      return { ...p, equippedSkills: p.equippedSkills.filter((id) => id !== skillId) };
+    });
+  }, [setPlayer, save?.activeRun]);
+
+  // Respec: unlearn every skill, refund all spent SP, charge 50g per refunded
+  // SP. The gold cost is the friction — players can rebuild their kit freely
+  // for a price, but they can't churn loadouts every single fight. Blocked
+  // mid-run for the same reason equipSkill is.
+  const resetSkills = useCallback(() => {
+    setPlayer((p) => {
+      if (save?.activeRun) {
+        queueMicrotask(() => toast.error("The Trainer will not see you mid-delve."));
+        return p;
+      }
+      const refundedSP = totalSpentSP(p);
+      if (refundedSP <= 0) {
+        queueMicrotask(() => toast.error("Nothing to refund."));
+        return p;
+      }
+      const cost = refundedSP * SKILL_RESPEC_GOLD_PER_SP;
+      if (p.gold < cost) {
+        queueMicrotask(() => toast.error(`Respec costs ${cost}g (${refundedSP} SP × ${SKILL_RESPEC_GOLD_PER_SP}g). You have ${p.gold}g.`));
+        return p;
+      }
+      queueMicrotask(() => toast.success(`✦ Skills reset. ${refundedSP} SP refunded for ${cost}g.`));
+      return {
+        ...p,
+        gold: p.gold - cost,
+        skillPoints: p.skillPoints + refundedSP,
+        skillRanks: {},
+        equippedSkills: [],
+      };
+    });
+  }, [setPlayer, save?.activeRun]);
+
   // ============ NEW GAME+ ============
   const startNewGamePlus = useCallback(() => {
     setSave((s) => {
@@ -982,9 +1120,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     dispatchEvent,
     refreshTraderStock, buyItem, buyConsumable,
     useConsumable, useConsumableInCombat,
-    turnInQuest, startNewGamePlus,
+    turnInQuest,
+    learnOrRankUpSkill, equipSkill, unequipSkill, resetSkills,
+    startNewGamePlus,
     power,
-  }), [save, hasSave, newGame, loadGame, resetGame, setPlayer, setActiveRun, updateActiveRun, equip, unequip, dismantle, sellItem, sellAll, upgradeItem, allocateStat, startDungeon, pushLog, endRun, unlockAchievement, claimDaily, restAtInn, restAtInnFree, innCost, canUseMercyCot, dispatchEvent, refreshTraderStock, buyItem, buyConsumable, useConsumable, useConsumableInCombat, turnInQuest, startNewGamePlus, power]);
+  }), [save, hasSave, newGame, loadGame, resetGame, setPlayer, setActiveRun, updateActiveRun, equip, unequip, dismantle, sellItem, sellAll, upgradeItem, allocateStat, startDungeon, pushLog, endRun, unlockAchievement, claimDaily, restAtInn, restAtInnFree, innCost, canUseMercyCot, dispatchEvent, refreshTraderStock, buyItem, buyConsumable, useConsumable, useConsumableInCombat, turnInQuest, learnOrRankUpSkill, equipSkill, unequipSkill, resetSkills, startNewGamePlus, power]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -1019,4 +1159,4 @@ export function generateLoot(dungeon: DungeonDef, diff: Difficulty, boss: boolea
 }
 
 // Re-export for use across components
-export { CONSUMABLES, TRADERS, QUESTS } from "./data";
+export { CONSUMABLES, TRADERS, QUESTS, SKILL_TREE } from "./data";

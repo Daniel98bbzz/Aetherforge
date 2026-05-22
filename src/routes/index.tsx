@@ -10,6 +10,7 @@ import { CharacterScreen } from "@/components/game/screens/CharacterScreen";
 import { ForgeScreen } from "@/components/game/screens/ForgeScreen";
 import { CodexScreen } from "@/components/game/screens/CodexScreen";
 import { AchievementsScreen } from "@/components/game/screens/AchievementsScreen";
+import { TrainerScreen } from "@/components/game/screens/TrainerScreen";
 import { Embers } from "@/components/game/Confetti";
 import { Toaster } from "@/components/ui/sonner";
 
@@ -48,10 +49,11 @@ function GameRoot() {
       {view === "hub" && <HubScreen setView={setView} />}
       {view === "dungeons" && <DungeonScreen />}
       {view === "inventory" && <InventoryScreen />}
-      {view === "character" && <CharacterScreen />}
+      {view === "character" && <CharacterScreen setView={setView} />}
       {view === "forge" && <ForgeScreen />}
       {view === "codex" && <CodexScreen />}
       {view === "achievements" && <AchievementsScreen />}
+      {view === "trainer" && <TrainerScreen />}
     </GameLayout>
   );
 }

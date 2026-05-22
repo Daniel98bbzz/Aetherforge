@@ -1,19 +1,21 @@
 import { useEffect, useRef, useState } from "react";
 import { useGame, generateLoot, CONSUMABLES } from "@/lib/game/store";
-import { DUNGEONS, CLASS_SKILLS } from "@/lib/game/data";
-import type { Consumable, Difficulty, Monster, RoomState } from "@/lib/game/types";
+import { DUNGEONS, SKILL_TREE } from "@/lib/game/data";
+import type { ActiveBuff, Consumable, Difficulty, Monster, RoomState, SkillNode } from "@/lib/game/types";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
-  availableDifficulties, consumeShield, DIFF_INDEX, generateItem, monsterAttack,
-  playerAttack, rollTier, statCheck, statCheckChance, ROOM_DC, tickBuffs,
+  applySkill, availableDifficulties, consumeShield, cooldownOf, DIFF_INDEX,
+  generateItem, monsterAttack, playerAttack, regenMana, rollTier,
+  startCooldown, statCheck, statCheckChance, ROOM_DC, tickBuffs, tickCooldowns,
 } from "@/lib/game/engine";
 import { Confetti } from "../Confetti";
 import { toast } from "sonner";
 import { TIER_COLORS } from "@/lib/game/types";
 import { DungeonLootPreview } from "../DungeonLootPreview";
+import { SkillTooltip } from "../SkillTooltip";
 
 const DIFFS: Difficulty[] = ["Novice","Adept","Expert","Master","Nightmare"];
 
@@ -502,13 +504,47 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
 
   const monster: Monster = { ...room.monster!, hp: monsterHp };
 
-  const doTurn = async (playerAction: () => { dmg: number; logLine: string; lifesteal?: number; manaCost?: number } | null) => {
+  // A player action returns the deltas to apply to the player + monster
+  // after their move. Skill outcomes may also carry a self-heal, a buff to
+  // grant, or a cooldown to start (cooldownSkillId / cooldownTurns).
+  interface TurnAction {
+    dmg: number;                  // damage dealt to the monster
+    logLine: string;
+    lifesteal?: number;
+    manaCost?: number;
+    selfHeal?: number;
+    grantBuff?: ActiveBuff;
+    cooldownSkillId?: string;
+    cooldownTurns?: number;
+  }
+
+  const doTurn = async (playerAction: () => TurnAction | null) => {
     if (busy) return;
     setBusy(true);
     const res = playerAction();
     if (!res) { setBusy(false); return; }
-    if (res.manaCost) setPlayer((pp) => ({ ...pp, mana: pp.mana - (res.manaCost ?? 0) }));
     pushLog(res.logLine);
+
+    // Apply player-side effects: mana spend, self-heal, granted buff,
+    // and mana regen for the turn. Single setPlayer batches them into
+    // one state write so React doesn't render half-applied states.
+    setPlayer((pp) => {
+      let next = { ...pp };
+      if (res.manaCost) next.mana = Math.max(0, next.mana - res.manaCost);
+      if (res.selfHeal) next.hp = Math.min(next.maxHp, next.hp + res.selfHeal);
+      if (res.grantBuff) {
+        const filtered = next.activeBuffs.filter(b => !(b.kind === res.grantBuff!.kind && b.source === res.grantBuff!.source));
+        next.activeBuffs = [...filtered, res.grantBuff];
+      }
+      // Combat-only mana regen — applied on the player's turn-end so the
+      // tick is visible immediately under the action bar.
+      next = regenMana(next);
+      return next;
+    });
+    if (res.cooldownSkillId && res.cooldownTurns && res.cooldownTurns > 0) {
+      updateActiveRun(r => startCooldown(r, res.cooldownSkillId!, res.cooldownTurns!));
+    }
+
     const newHp = monsterHp - res.dmg;
     setMonsterHp(newHp);
     if (res.lifesteal) {
@@ -522,16 +558,11 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
       if (!p.achievements.includes("a_first_kill")) unlockAchievement("a_first_kill");
       dispatchEvent({ type: "monster_killed", monsterId: monster.id, dungeonId: dungeon.id });
       let extraLoot: ReturnType<typeof generateLoot> = [];
-      // Trash-mob drop chance lowered from 35% → 20%. Boss loot piñatas
-      // remain unchanged so the reward arc still points at the boss.
       if (Math.random() < 0.20 || room.kind === "boss") {
         extraLoot = generateLoot(dungeon, run.difficulty, false, false);
         extraLoot.forEach((l) => pushLog(`  ↳ Loot: ${l.name} [${l.tier}]`));
         extraLoot.forEach((l) => dispatchEvent({ type: "tier_found", tier: l.tier }));
       }
-      // Functional update so the gold/xp/loot from this kill is folded
-      // on top of whatever the latest run state is — important when
-      // multiple turn-end writes interleave with carried-promotion reads.
       updateActiveRun(r => ({
         ...r,
         gold: r.gold + goldGain,
@@ -549,12 +580,15 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
       let died = false;
       setPlayer((pp) => {
         const { player: shielded, absorbed, remaining } = consumeShield(pp, a.damage);
-        if (absorbed > 0) queueMicrotask(() => pushLog(`  ↳ Iron Skin absorbs ${absorbed} damage.`));
+        if (absorbed > 0) queueMicrotask(() => pushLog(`  ↳ ${shielded.activeBuffs.find(b => b.kind === "shield")?.source ?? "Shield"} absorbs ${absorbed} damage.`));
         const nextHp = shielded.hp - remaining;
         died = nextHp <= 0;
         return tickBuffs({ ...shielded, hp: Math.max(0, nextHp) });
       });
-      // The setter mutates `died` synchronously; check after dispatch
+      // Tick cooldowns once per full exchange (player turn + monster turn).
+      // A "3-turn cooldown" therefore means three full exchanges, which
+      // matches the player's intuition that a CD is "three turns" of play.
+      updateActiveRun(r => tickCooldowns(r));
       setTimeout(() => {
         if (died) {
           pushLog(`✘ Darkness takes you.`);
@@ -566,16 +600,37 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
     }, 500);
   };
 
-  const basicAttack = () => {
+  const basicAttack = (): TurnAction => {
     const r = playerAttack(save!.player, monster, 1, "strike");
     return { dmg: r.damage, logLine: r.log, lifesteal: r.lifesteal };
   };
-  const useSkill = (s: { name: string; cost: number; mult: number }) => {
-    if (save!.player.mana < s.cost) { toast.error("Not enough mana"); return null; }
-    const r = playerAttack(save!.player, monster, s.mult, s.name);
-    return { dmg: r.damage, logLine: r.log, lifesteal: r.lifesteal, manaCost: s.cost };
+
+  // Skill resolution. Routes damage skills through `applySkill` (which
+  // already plumbs the same crit/variance/fire pipeline) and folds the
+  // heal/buff branches into the same TurnAction shape so doTurn doesn't
+  // need to grow a switch.
+  const useSkillNode = (node: SkillNode): TurnAction | null => {
+    const rank = save!.player.skillRanks?.[node.id] ?? 0;
+    if (rank < 1) { toast.error(`${node.name} is not unlocked.`); return null; }
+    const cd = cooldownOf(run, node.id);
+    if (cd > 0) { toast.error(`${node.name} on cooldown (${cd}t).`); return null; }
+    const stepsAbove = Math.max(0, rank - 1);
+    const manaCost = node.baseManaCost + node.manaCostPerRank * stepsAbove;
+    if (save!.player.mana < manaCost) { toast.error("Not enough mana."); return null; }
+    const res = applySkill(save!.player, monster, node, rank);
+    return {
+      dmg: res.damage,
+      logLine: res.log,
+      lifesteal: res.lifesteal,
+      manaCost,
+      selfHeal: res.heal > 0 ? res.heal : undefined,
+      grantBuff: res.buff,
+      cooldownSkillId: node.id,
+      cooldownTurns: node.cooldown,
+    };
   };
-  const useItemAction = (consumableId: string) => {
+
+  const useItemAction = (consumableId: string): TurnAction | null => {
     const cd = CONSUMABLES.find(c => c.id === consumableId);
     const stack = save!.player.consumables.find((s) => s.itemId === consumableId);
     if (!cd || !stack || stack.qty <= 0) return null;
@@ -583,18 +638,19 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
     if (!log) return null;
     return { dmg: 0, logLine: `You use ${cd.name}.` };
   };
-  // In-combat Flee is the "I give up this fight" option. Boss combat is the
-  // only place it can appear — the boss chamber disables the header's
-  // Retreat button, so Flee is the player's safety valve there (counts as
-  // a defeat: 50% of carried). In non-boss rooms we deliberately omit Flee
-  // so players use the strictly-better header Retreat (100% of carried)
-  // instead of trapping themselves into the wrong button.
+
   const concedeBoss = () => {
     pushLog("You concede the boss chamber.");
     onResolve({ victory: false });
   };
 
-  const skills = CLASS_SKILLS[p.charClass];
+  // Resolve the player's equipped skills (max 5) into actual SkillNode
+  // objects. Filter out ids that no longer exist in SKILL_TREE — defensive
+  // against future data deletions / class changes / failed migrations.
+  const equippedSkills: SkillNode[] = (save!.player.equippedSkills ?? [])
+    .map((id) => SKILL_TREE.find((s) => s.id === id))
+    .filter((n): n is SkillNode => !!n && n.charClass === p.charClass);
+
   const isBoss = room.kind === "boss";
   const monsterColor = isBoss ? "#dc2626" : "#a855f7";
   const usableConsumables = save!.player.consumables.filter((s) => s.qty > 0);
@@ -619,26 +675,46 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
           <div className="flex justify-between text-xs mb-1"><span>You — {p.hp}/{p.maxHp} HP</span><span>{p.mana}/{p.maxMana} MP</span></div>
           <Progress value={(p.hp / p.maxHp) * 100} className="[&>div]:bg-emerald-500" />
         </div>
-        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
           <Button onClick={() => doTurn(basicAttack)} disabled={busy}>Attack</Button>
-          {skills.map((s) => (
-            <Button key={s.name} variant="outline" onClick={() => doTurn(() => useSkill(s))} disabled={busy || p.mana < s.cost}>
-              {s.name} ({s.cost})
-            </Button>
-          ))}
+          {equippedSkills.map((node) => {
+            const rank = save!.player.skillRanks?.[node.id] ?? 0;
+            const cdLeft = cooldownOf(run, node.id);
+            const stepsAbove = Math.max(0, rank - 1);
+            const manaCost = node.baseManaCost + node.manaCostPerRank * stepsAbove;
+            const disabled = busy || cdLeft > 0 || save!.player.mana < manaCost;
+            return (
+              <SkillTooltip key={node.id} skill={node} player={save!.player} rank={rank} side="top">
+                <Button
+                  variant="outline"
+                  onClick={() => doTurn(() => useSkillNode(node))}
+                  disabled={disabled}
+                  className="w-full"
+                >
+                  <span className="flex flex-col items-center leading-tight">
+                    <span className="text-xs">{node.name}</span>
+                    <span className="text-[10px] text-muted-foreground">
+                      {cdLeft > 0 ? `CD ${cdLeft}t` : `${manaCost} MP · R${rank}`}
+                    </span>
+                  </span>
+                </Button>
+              </SkillTooltip>
+            );
+          })}
           <Button variant="outline" disabled={busy || usableConsumables.length === 0} onClick={() => setItemMenuOpen(true)}>
             Use Item
           </Button>
-          {isBoss ? (
+          {isBoss && (
             <Button variant="ghost" onClick={concedeBoss} disabled={busy} title="Concede the boss — half of secured rewards. The boss reward is forfeit.">
               Flee
             </Button>
-          ) : (
-            // Non-boss combat: no Flee. Use the header Retreat for a safe
-            // exit (full carried payout), or play the fight through.
-            <span className="hidden sm:block" aria-hidden />
           )}
         </div>
+        {equippedSkills.length === 0 && (
+          <p className="text-[11px] italic text-muted-foreground">
+            No skills equipped. Visit the Skill Trainer in Eldergate to learn skills, then slot them in your Inventory.
+          </p>
+        )}
       </Card>
 
       <Dialog open={itemMenuOpen} onOpenChange={setItemMenuOpen}>

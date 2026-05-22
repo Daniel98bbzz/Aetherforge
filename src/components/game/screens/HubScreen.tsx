@@ -3,7 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { useGame, QUESTS, TRADERS } from "@/lib/game/store";
 import type { View } from "../Layout";
-import { Swords, Backpack, Hammer, Trophy, Sparkles, ScrollText, Bed } from "lucide-react";
+import { Swords, Backpack, Hammer, Trophy, Sparkles, ScrollText, Bed, GraduationCap } from "lucide-react";
 import { TraderModal, TraderCard } from "../TraderModal";
 import { useState } from "react";
 import { describeObjective } from "@/lib/game/engine";
@@ -42,9 +42,10 @@ export function HubScreen({ setView }: { setView: (v: View) => void }) {
         </Card>
       )}
 
-      <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-3">
         <button onClick={() => setView("dungeons")} className="glow-card text-left rounded-lg border-2 border-primary/30 p-4 bg-card/60 text-primary"><Swords className="w-6 h-6 mb-2"/><div className="font-serif">Dungeons</div><p className="text-xs text-muted-foreground">Venture into darkness.</p></button>
         <button onClick={() => setView("inventory")} className="glow-card text-left rounded-lg border-2 border-amber-500/30 p-4 bg-card/60 text-amber-400"><Backpack className="w-6 h-6 mb-2"/><div className="font-serif">Inventory</div><p className="text-xs text-muted-foreground">{p.inventory.length} unequipped · {p.consumables.reduce((a,c)=>a+c.qty,0)} potions</p></button>
+        <button onClick={() => setView("trainer")} className="glow-card text-left rounded-lg border-2 border-sky-500/30 p-4 bg-card/60 text-sky-300"><GraduationCap className="w-6 h-6 mb-2"/><div className="font-serif">Skill Trainer</div><p className="text-xs text-muted-foreground">{p.skillPoints} SP · {p.equippedSkills.length}/5 equipped</p></button>
         <button onClick={() => setView("forge")} className="glow-card text-left rounded-lg border-2 border-orange-500/30 p-4 bg-card/60 text-orange-400"><Hammer className="w-6 h-6 mb-2"/><div className="font-serif">The Forge</div><p className="text-xs text-muted-foreground">{p.shards} shards · {p.essence} essence</p></button>
         <button onClick={() => setView("achievements")} className="glow-card text-left rounded-lg border-2 border-yellow-400/30 p-4 bg-card/60 text-yellow-400"><Trophy className="w-6 h-6 mb-2"/><div className="font-serif">Glory</div><p className="text-xs text-muted-foreground">{p.achievements.length} unlocked</p></button>
       </div>

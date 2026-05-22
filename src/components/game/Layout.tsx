@@ -1,17 +1,18 @@
 import { useState, type ReactNode } from "react";
-import { Home, Swords, Backpack, User, Hammer, BookOpen, Trophy, Settings, Coins, Sparkles } from "lucide-react";
+import { Home, Swords, Backpack, User, Hammer, BookOpen, Trophy, Settings, Coins, Sparkles, GraduationCap } from "lucide-react";
 import { useGame } from "@/lib/game/store";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 
-export type View = "hub" | "dungeons" | "inventory" | "character" | "forge" | "codex" | "achievements";
+export type View = "hub" | "dungeons" | "inventory" | "character" | "forge" | "codex" | "achievements" | "trainer";
 
 const NAV: { id: View; label: string; icon: any }[] = [
   { id:"hub", label:"Eldergate", icon: Home },
   { id:"dungeons", label:"Dungeons", icon: Swords },
   { id:"inventory", label:"Inventory", icon: Backpack },
   { id:"character", label:"Character", icon: User },
+  { id:"trainer", label:"Skill Trainer", icon: GraduationCap },
   { id:"forge", label:"Forge", icon: Hammer },
   { id:"codex", label:"Codex", icon: BookOpen },
   { id:"achievements", label:"Achievements", icon: Trophy },

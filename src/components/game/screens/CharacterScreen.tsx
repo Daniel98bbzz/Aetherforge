@@ -1,15 +1,22 @@
-import { useGame } from "@/lib/game/store";
+import { useGame, SKILL_TREE } from "@/lib/game/store";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
-import { CLASS_SKILLS } from "@/lib/game/data";
 import { StatTooltip } from "../StatTooltip";
+import { SkillTooltip } from "../SkillTooltip";
+import { Sparkles, GraduationCap } from "lucide-react";
+import type { View } from "../Layout";
 
-export function CharacterScreen() {
+export function CharacterScreen({ setView }: { setView?: (v: View) => void }) {
   const { save, allocateStat } = useGame();
   if (!save) return null;
   const p = save.player;
-  const skills = CLASS_SKILLS[p.charClass];
+
+  // All skills the player has unlocked at any rank, for the read-only
+  // overview on this screen. Live editing happens at the Skill Trainer.
+  const unlockedSkills = SKILL_TREE.filter(
+    (s) => s.charClass === p.charClass && (p.skillRanks?.[s.id] ?? 0) >= 1,
+  );
 
   const StatRow = ({ k, label }: { k: "str"|"agi"|"int"|"vit"; label: string }) => (
     <div className="flex items-center gap-3">
@@ -55,18 +62,60 @@ export function CharacterScreen() {
       </Card>
 
       <Card className="p-5 bg-card/60">
-        <h2 className="font-serif text-xl text-amber-300 mb-3">Class Skills</h2>
-        <ul className="space-y-2">
-          {skills.map((s) => (
-            <li key={s.name} className="p-3 rounded bg-background/40 border border-border">
-              <div className="flex justify-between font-serif">
-                <span>{s.name}</span>
-                <span className="text-sky-400 text-sm">{s.cost} mana</span>
-              </div>
-              <p className="text-sm text-muted-foreground">{s.desc} (×{s.mult} damage)</p>
-            </li>
-          ))}
-        </ul>
+        <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+          <h2 className="font-serif text-xl text-amber-300 flex items-center gap-2">
+            <GraduationCap className="w-5 h-5" /> Skills
+          </h2>
+          <div className="flex items-center gap-3 text-xs">
+            <span className="flex items-center gap-1 text-amber-300">
+              <Sparkles className="w-3.5 h-3.5" /> {p.skillPoints} SP
+            </span>
+            <span className="text-muted-foreground">
+              {unlockedSkills.length} learned · {p.equippedSkills.length}/5 equipped
+            </span>
+            {setView && (
+              <Button size="sm" variant="outline" onClick={() => setView("trainer")}>
+                Open Trainer
+              </Button>
+            )}
+          </div>
+        </div>
+        {unlockedSkills.length === 0 ? (
+          <p className="text-sm italic text-muted-foreground">
+            You have not yet learned any skills. Visit the Skill Trainer at Eldergate.
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {unlockedSkills.map((s) => {
+              const rank = p.skillRanks[s.id];
+              const equipped = p.equippedSkills.includes(s.id);
+              return (
+                <li key={s.id}>
+                  <SkillTooltip skill={s} player={p} rank={rank}>
+                    <div className="p-3 rounded bg-background/40 border border-border cursor-help">
+                      <div className="flex justify-between font-serif items-center">
+                        <span>
+                          {s.name}
+                          <span className="ml-2 text-[11px] text-amber-400 tracking-wider">
+                            R{rank}/{s.maxRank}
+                          </span>
+                          {equipped && (
+                            <span className="ml-2 text-[10px] uppercase text-sky-400">equipped</span>
+                          )}
+                        </span>
+                        <span className="text-sky-400 text-sm">
+                          {s.baseManaCost + s.manaCostPerRank * (rank - 1)} mana
+                          {s.cooldown > 0 && <span className="ml-1 text-muted-foreground">· CD {s.cooldown}t</span>}
+                        </span>
+                      </div>
+                      <p className="text-sm text-muted-foreground">{s.description}</p>
+                    </div>
+                  </SkillTooltip>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </Card>
     </div>
   );

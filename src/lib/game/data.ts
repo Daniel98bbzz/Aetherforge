@@ -1,4 +1,4 @@
-import type { Item, Monster, DungeonDef, Slot, Tier, Affix, Consumable, TraderDef, QuestDef } from "./types";
+import type { Item, Monster, DungeonDef, Slot, Tier, Affix, Consumable, TraderDef, QuestDef, SkillNode } from "./types";
 
 const mkItem = (id: string, name: string, tier: Tier, slot: Slot, power: number, stats: Item["stats"], flavor: string, affixes: Affix[] = []): Item => ({
   id, name, tier, slot, power, stats, affixes, flavor,
@@ -199,20 +199,276 @@ export const STARTER_KITS: Record<string, string[]> = {
   sorcerer:["w_apprentice_wand","h_cloth_cap","c_tunic","b_sandals"],
 };
 
-export const CLASS_SKILLS: Record<string, { name: string; cost: number; mult: number; desc: string }[]> = {
-  warrior: [
-    { name:"Cleave", cost: 8, mult: 1.8, desc:"A wide arcing strike." },
-    { name:"Shield Bash", cost: 12, mult: 2.4, desc:"Brutal staggering blow." },
-  ],
-  ranger: [
-    { name:"Piercing Shot", cost: 8, mult: 1.9, desc:"An arrow that finds gaps." },
-    { name:"Hailstorm", cost: 14, mult: 2.6, desc:"A barrage of arrows." },
-  ],
-  sorcerer: [
-    { name:"Arcane Bolt", cost: 8, mult: 2.0, desc:"A focused lance of mana." },
-    { name:"Starfall", cost: 16, mult: 3.0, desc:"Calls down burning stars." },
-  ],
-};
+// ============ SKILL TREE ============
+// Per-class skill graph. Each node carries its own rank progression:
+//   • rankCosts[i] is the SP cost to reach rank (i+1).
+//   • baseManaCost + manaCostPerRank * (rank-1) — costs grow with power.
+//   • effect.baseMagnitude / magnitudePerRank — damage/heal/shield growth.
+//   • effect.scaling.basePct / pctPerRank — % of the chosen stat applied.
+// Prerequisites: each entry in `requires` must have rank >= 1 (i.e. unlocked,
+// not necessarily maxed). Matches the "basic heal → AOE heal" gating rule.
+export const SKILL_TREE: SkillNode[] = [
+  // ===================== WARRIOR =====================
+  {
+    id: "war_strike", charClass: "warrior", name: "Power Strike",
+    description: "A heavy overhead chop that punches through guards.",
+    kind: "active_attack",
+    maxRank: 5,
+    rankCosts: [1, 1, 1, 2, 2],
+    baseManaCost: 6, manaCostPerRank: 1,
+    cooldown: 0,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 1.3, magnitudePerRank: 0.2,
+      scaling: { stat: "str", basePct: 130, pctPerRank: 25 },
+    },
+    requires: [],
+    position: { tier: 1, col: 1 },
+    flavor: "The simplest answer is force.",
+  },
+  {
+    id: "war_iron_will", charClass: "warrior", name: "Iron Will",
+    description: "Steel your nerves: a brief surge of strength.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [1, 2, 2],
+    baseManaCost: 10, manaCostPerRank: 2,
+    cooldown: 2,
+    effect: {
+      kind: "buff_stat",
+      baseMagnitude: 6, magnitudePerRank: 3,
+      duration: 3,
+      buffKind: "buff_str",
+    },
+    requires: [],
+    position: { tier: 1, col: 2 },
+    flavor: "Hold the line. Hold yourself.",
+  },
+  {
+    id: "war_cleave", charClass: "warrior", name: "Cleave",
+    description: "Wide arcing strike that crushes armored foes.",
+    kind: "active_attack",
+    maxRank: 5,
+    rankCosts: [2, 2, 2, 3, 3],
+    baseManaCost: 14, manaCostPerRank: 2,
+    cooldown: 2,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 2.0, magnitudePerRank: 0.3,
+      scaling: { stat: "str", basePct: 200, pctPerRank: 35 },
+    },
+    requires: ["war_strike"],
+    position: { tier: 2, col: 1 },
+    flavor: "One swing, three regrets.",
+  },
+  {
+    id: "war_bulwark", charClass: "warrior", name: "Bulwark",
+    description: "Raise an iron shield that absorbs incoming blows.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [2, 3, 3],
+    baseManaCost: 18, manaCostPerRank: 4,
+    cooldown: 3,
+    effect: {
+      kind: "shield",
+      baseMagnitude: 70, magnitudePerRank: 35,
+      duration: 99,
+    },
+    requires: ["war_iron_will"],
+    position: { tier: 2, col: 2 },
+    flavor: "Bend the world around you, not the other way.",
+  },
+  {
+    id: "war_earthshaker", charClass: "warrior", name: "Earthshaker",
+    description: "Devastating slam that rattles even bosses.",
+    kind: "active_attack",
+    maxRank: 3,
+    rankCosts: [3, 3, 4],
+    baseManaCost: 24, manaCostPerRank: 3,
+    cooldown: 3,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 3.2, magnitudePerRank: 0.5,
+      scaling: { stat: "str", basePct: 320, pctPerRank: 50 },
+    },
+    requires: ["war_cleave"],
+    position: { tier: 3, col: 1 },
+    flavor: "The mountain answers when you knock.",
+  },
+
+  // ===================== RANGER =====================
+  {
+    id: "rng_pierce", charClass: "ranger", name: "Piercing Shot",
+    description: "An arrow that threads gaps in armor.",
+    kind: "active_attack",
+    maxRank: 5,
+    rankCosts: [1, 1, 1, 2, 2],
+    baseManaCost: 6, manaCostPerRank: 1,
+    cooldown: 0,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 1.4, magnitudePerRank: 0.2,
+      scaling: { stat: "agi", basePct: 140, pctPerRank: 25 },
+    },
+    requires: [],
+    position: { tier: 1, col: 1 },
+    flavor: "Aim for the unguarded breath.",
+  },
+  {
+    id: "rng_focus", charClass: "ranger", name: "Hawk's Focus",
+    description: "Slow the world. Sharpen your aim.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [1, 2, 2],
+    baseManaCost: 8, manaCostPerRank: 2,
+    cooldown: 2,
+    effect: {
+      kind: "buff_stat",
+      baseMagnitude: 8, magnitudePerRank: 4,
+      duration: 3,
+      buffKind: "buff_agi",
+    },
+    requires: [],
+    position: { tier: 1, col: 2 },
+    flavor: "The hawk does not chase. It waits.",
+  },
+  {
+    id: "rng_volley", charClass: "ranger", name: "Volley",
+    description: "Three rapid shots, fired faster than thought.",
+    kind: "active_attack",
+    maxRank: 5,
+    rankCosts: [2, 2, 2, 3, 3],
+    baseManaCost: 14, manaCostPerRank: 2,
+    cooldown: 2,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 2.2, magnitudePerRank: 0.3,
+      scaling: { stat: "agi", basePct: 220, pctPerRank: 35 },
+    },
+    requires: ["rng_pierce"],
+    position: { tier: 2, col: 1 },
+    flavor: "Empty quiver, full conscience.",
+  },
+  {
+    id: "rng_evade", charClass: "ranger", name: "Evasive Roll",
+    description: "Tumble aside; the next strike skitters off a phantom guard.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [2, 3, 3],
+    baseManaCost: 14, manaCostPerRank: 3,
+    cooldown: 3,
+    effect: {
+      kind: "shield",
+      baseMagnitude: 55, magnitudePerRank: 25,
+      duration: 99,
+    },
+    requires: ["rng_focus"],
+    position: { tier: 2, col: 2 },
+    flavor: "Be where the blade is not.",
+  },
+  {
+    id: "rng_hailstorm", charClass: "ranger", name: "Hailstorm",
+    description: "Sky-darkening barrage of arrows.",
+    kind: "active_attack",
+    maxRank: 3,
+    rankCosts: [3, 3, 4],
+    baseManaCost: 26, manaCostPerRank: 3,
+    cooldown: 3,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 3.5, magnitudePerRank: 0.5,
+      scaling: { stat: "agi", basePct: 350, pctPerRank: 50 },
+    },
+    requires: ["rng_volley"],
+    position: { tier: 3, col: 1 },
+    flavor: "The sky remembers every shaft.",
+  },
+
+  // ===================== SORCERER =====================
+  {
+    id: "sor_bolt", charClass: "sorcerer", name: "Arcane Bolt",
+    description: "A focused lance of pure mana.",
+    kind: "active_attack",
+    maxRank: 5,
+    rankCosts: [1, 1, 1, 2, 2],
+    baseManaCost: 6, manaCostPerRank: 1,
+    cooldown: 0,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 1.5, magnitudePerRank: 0.2,
+      scaling: { stat: "int", basePct: 150, pctPerRank: 25 },
+    },
+    requires: [],
+    position: { tier: 1, col: 1 },
+    flavor: "First lesson: light hurts.",
+  },
+  {
+    id: "sor_mend", charClass: "sorcerer", name: "Mend",
+    description: "Knit wounds with whispered syllables.",
+    kind: "active_heal",
+    maxRank: 5,
+    rankCosts: [1, 1, 2, 2, 3],
+    baseManaCost: 12, manaCostPerRank: 2,
+    cooldown: 2,
+    effect: {
+      kind: "heal",
+      baseMagnitude: 0.20, magnitudePerRank: 0.05,
+    },
+    requires: [],
+    position: { tier: 1, col: 2 },
+    flavor: "Flesh listens, if you speak slowly.",
+  },
+  {
+    id: "sor_starfall", charClass: "sorcerer", name: "Starfall",
+    description: "Calls down burning stars upon a single foe.",
+    kind: "active_attack",
+    maxRank: 5,
+    rankCosts: [2, 2, 2, 3, 3],
+    baseManaCost: 16, manaCostPerRank: 2,
+    cooldown: 2,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 2.4, magnitudePerRank: 0.4,
+      scaling: { stat: "int", basePct: 240, pctPerRank: 40 },
+    },
+    requires: ["sor_bolt"],
+    position: { tier: 2, col: 1 },
+    flavor: "Borrowed light, paid back in full.",
+  },
+  {
+    id: "sor_renewal", charClass: "sorcerer", name: "Greater Renewal",
+    description: "Pour vitality back into yourself in a flood.",
+    kind: "active_heal",
+    maxRank: 3,
+    rankCosts: [2, 3, 3],
+    baseManaCost: 22, manaCostPerRank: 4,
+    cooldown: 3,
+    effect: {
+      kind: "heal",
+      baseMagnitude: 0.45, magnitudePerRank: 0.10,
+    },
+    requires: ["sor_mend"],
+    position: { tier: 2, col: 2 },
+    flavor: "The body remembers the shape of itself.",
+  },
+  {
+    id: "sor_cataclysm", charClass: "sorcerer", name: "Cataclysm",
+    description: "World-ender. The air itself becomes a weapon.",
+    kind: "active_attack",
+    maxRank: 3,
+    rankCosts: [3, 3, 4],
+    baseManaCost: 30, manaCostPerRank: 3,
+    cooldown: 3,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 4.0, magnitudePerRank: 0.6,
+      scaling: { stat: "int", basePct: 400, pctPerRank: 60 },
+    },
+    requires: ["sor_starfall"],
+    position: { tier: 3, col: 1 },
+    flavor: "The first sentence of an ending.",
+  },
+];
 
 export const AFFIX_POOL: Affix[] = [
   { name:"+10% Crit", value: 10, kind:"crit" },

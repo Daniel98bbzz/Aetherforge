@@ -1,14 +1,15 @@
-import { useGame, CONSUMABLES } from "@/lib/game/store";
+import { useGame, CONSUMABLES, SKILL_TREE } from "@/lib/game/store";
 import { ItemCard } from "../ItemCard";
 import { StatTooltip } from "../StatTooltip";
+import { SkillTooltip } from "../SkillTooltip";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { TIER_COLORS, TIER_VALUE } from "@/lib/game/types";
-import type { Item, Slot } from "@/lib/game/types";
+import { MAX_EQUIPPED_SKILLS, TIER_COLORS, TIER_VALUE } from "@/lib/game/types";
+import type { Item, Slot, SkillNode } from "@/lib/game/types";
 import { useMemo, useState } from "react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { computeStats } from "@/lib/game/engine";
-import { Coins } from "lucide-react";
+import { Coins, GraduationCap } from "lucide-react";
 
 const SLOTS: Slot[] = ["weapon","helmet","chest","boots","ring","amulet"];
 type SortKey = "tier_desc" | "tier_asc" | "power_desc" | "value_desc" | "recent";
@@ -23,11 +24,12 @@ const SORT_LABELS: Record<SortKey, string> = {
 };
 
 export function InventoryScreen() {
-  const { save, equip, unequip, dismantle, sellItem, useConsumable } = useGame();
+  const { save, equip, unequip, dismantle, sellItem, useConsumable, equipSkill, unequipSkill } = useGame();
   const [selected, setSelected] = useState<Item | null>(null);
   const [tab, setTab] = useState<"gear" | "consumables">("gear");
   const [sortKey, setSortKey] = useState<SortKey>("tier_desc");
   const [slotFilter, setSlotFilter] = useState<SlotFilter>("all");
+  const [skillPickerOpen, setSkillPickerOpen] = useState(false);
 
   const sortedInv = useMemo(() => {
     if (!save) return [] as Item[];
@@ -67,6 +69,13 @@ export function InventoryScreen() {
           })}
         </div>
       </div>
+
+      {/* === Action Bar (max 5 equipped skills) === */}
+      <ActionBarSection
+        onOpenPicker={() => setSkillPickerOpen(true)}
+        onUnequip={(id) => unequipSkill(id)}
+        inRun={!!save.activeRun}
+      />
 
       <Card className="p-4 bg-card/60 border-border">
         <h2 className="font-serif text-xl text-amber-300 mb-2">Active Bonuses</h2>
@@ -208,6 +217,141 @@ export function InventoryScreen() {
           )}
         </DialogContent>
       </Dialog>
+
+      {/* Skill Picker — lists every unlocked skill not yet on the action bar */}
+      <Dialog open={skillPickerOpen} onOpenChange={setSkillPickerOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle className="font-serif">Choose a Skill</DialogTitle></DialogHeader>
+          <p className="text-xs text-muted-foreground italic mb-2">
+            Tap a skill to slot it into your action bar. Up to {MAX_EQUIPPED_SKILLS}.
+          </p>
+          <SkillPickerList
+            onPick={(id) => { equipSkill(id); setSkillPickerOpen(false); }}
+            inRun={!!save.activeRun}
+          />
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+// ====================== ACTION BAR SECTION ======================
+// Shows the 5 equipped-skill slots between Equipped Gear and Active Bonuses.
+// Empty slots open the picker; filled slots show a tooltip + Unequip on click.
+
+function ActionBarSection({
+  onOpenPicker, onUnequip, inRun,
+}: {
+  onOpenPicker: () => void;
+  onUnequip: (id: string) => void;
+  inRun: boolean;
+}) {
+  const { save } = useGame();
+  if (!save) return null;
+  const p = save.player;
+
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-3 gap-3 flex-wrap">
+        <h2 className="font-serif text-xl text-amber-300 flex items-center gap-2">
+          <GraduationCap className="w-5 h-5" /> Action Bar
+          <span className="text-sm text-muted-foreground">
+            ({p.equippedSkills.length}/{MAX_EQUIPPED_SKILLS})
+          </span>
+        </h2>
+        <p className="text-xs text-muted-foreground italic">
+          Bring up to {MAX_EQUIPPED_SKILLS} skills into combat. Cannot be changed mid-delve.
+        </p>
+      </div>
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-3">
+        {Array.from({ length: MAX_EQUIPPED_SKILLS }).map((_, i) => {
+          const id = p.equippedSkills[i];
+          const node: SkillNode | undefined = id ? SKILL_TREE.find((s) => s.id === id) : undefined;
+          if (!node) {
+            return (
+              <button
+                key={`empty-${i}`}
+                onClick={onOpenPicker}
+                disabled={inRun}
+                className="rounded-lg border-2 border-dashed border-border bg-card/20 p-3 text-xs text-muted-foreground hover:border-sky-500/40 hover:text-sky-300 transition-colors disabled:opacity-40 disabled:cursor-not-allowed min-h-[88px] flex flex-col items-center justify-center gap-1"
+              >
+                <span className="text-2xl leading-none">+</span>
+                <span>Empty slot</span>
+              </button>
+            );
+          }
+          const rank = p.skillRanks[id!] ?? 0;
+          return (
+            <SkillTooltip key={id} skill={node} player={p} rank={rank}>
+              <div className="rounded-lg border-2 border-sky-500/40 bg-sky-500/5 p-3 min-h-[88px] flex flex-col justify-between">
+                <div>
+                  <div className="font-serif text-sky-200 text-sm leading-tight">{node.name}</div>
+                  <div className="text-[10px] text-muted-foreground mt-0.5">
+                    Rank {rank} / {node.maxRank} · {node.kind.replace("active_", "").replace("_", " ")}
+                  </div>
+                </div>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="mt-2 h-7 text-[11px]"
+                  onClick={() => onUnequip(id!)}
+                  disabled={inRun}
+                >
+                  Unequip
+                </Button>
+              </div>
+            </SkillTooltip>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function SkillPickerList({ onPick, inRun }: { onPick: (id: string) => void; inRun: boolean }) {
+  const { save } = useGame();
+  if (!save) return null;
+  const p = save.player;
+  // Unlocked but not yet equipped, filtered to the player's class.
+  const candidates = SKILL_TREE.filter(
+    (s) =>
+      s.charClass === p.charClass &&
+      (p.skillRanks[s.id] ?? 0) >= 1 &&
+      !p.equippedSkills.includes(s.id),
+  );
+  if (candidates.length === 0) {
+    return (
+      <p className="text-sm italic text-muted-foreground">
+        No more skills to add. Visit the Skill Trainer to unlock more.
+      </p>
+    );
+  }
+  const full = p.equippedSkills.length >= MAX_EQUIPPED_SKILLS;
+  return (
+    <div className="space-y-2">
+      {full && (
+        <p className="text-xs text-destructive">
+          Action bar full ({MAX_EQUIPPED_SKILLS}/{MAX_EQUIPPED_SKILLS}). Unequip a skill first.
+        </p>
+      )}
+      {candidates.map((node) => {
+        const rank = p.skillRanks[node.id] ?? 0;
+        return (
+          <SkillTooltip key={node.id} skill={node} player={p} rank={rank}>
+            <div className="flex items-center justify-between gap-2 rounded border border-border bg-card/40 p-2">
+              <div>
+                <div className="font-serif text-amber-200 text-sm">{node.name}</div>
+                <div className="text-[10px] text-muted-foreground">
+                  Rank {rank} / {node.maxRank} · Tier {node.position.tier}
+                </div>
+              </div>
+              <Button size="sm" onClick={() => onPick(node.id)} disabled={full || inRun}>
+                Equip
+              </Button>
+            </div>
+          </SkillTooltip>
+        );
+      })}
     </div>
   );
 }

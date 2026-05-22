@@ -74,6 +74,64 @@ export interface ActiveRun {
   carriedXp: number;
   carriedLoot: Item[];
   log: string[];
+  // Active skill cooldowns. Run-scoped (NOT player-scoped) so they reset
+  // automatically on every endRun (victory / retreat / defeat) — matching
+  // the design contract "every new dungeon run starts with 0 cooldowns".
+  cooldowns: SkillCooldown[];
+}
+
+// === Skills (Skill Tree, Ranks, Cooldowns) ===
+export type SkillKind =
+  | "active_attack"   // does damage; uses player's combat damage pipeline
+  | "active_heal"     // restores HP
+  | "active_buff";    // grants an ActiveBuff (shield / stat boost)
+
+export type SkillScalingStat = "str" | "agi" | "int" | "vit" | "weaponPower";
+
+export interface SkillScaling {
+  stat: SkillScalingStat;
+  // Base percent of the stat applied at rank 1 (e.g., 150 = 150% of STR),
+  // plus an additive bonus per rank above 1.
+  basePct: number;
+  pctPerRank: number;
+}
+
+export interface SkillEffect {
+  kind: "damage" | "heal" | "shield" | "buff_stat";
+  // Base value at rank 1. For "damage": damage-multiplier seed (also see
+  // scaling). For "heal": fraction of maxHp (0.25 = 25%). For "shield":
+  // flat absorption. For "buff_stat": magnitude of the stat buff.
+  baseMagnitude: number;
+  magnitudePerRank: number;
+  scaling?: SkillScaling;
+  duration?: number;             // turns (for buff_stat / shield)
+  buffKind?: ConsumableKind;     // reuses ActiveBuff plumbing (buff_str/agi/int/vit/shield)
+}
+
+export interface SkillNode {
+  id: string;
+  charClass: CharClass;
+  name: string;
+  description: string;
+  kind: SkillKind;
+  maxRank: number;
+  // SP cost per rank. Index 0 = cost to UNLOCK (rank 0 → 1). Length === maxRank.
+  // Example: [1, 1, 2] means unlock=1, rank2=1, rank3=2 (total 4 SP for max).
+  rankCosts: number[];
+  baseManaCost: number;
+  manaCostPerRank: number;       // added per rank above 1; balances bigger ranks
+  cooldown: number;              // in combat turns; 0 = no cooldown
+  effect: SkillEffect;
+  // Prerequisite skill IDs — must each have rank >= 1 before this skill
+  // can be unlocked (does NOT require the prereq be maxed).
+  requires: string[];
+  position: { tier: 1 | 2 | 3; col: number };
+  flavor?: string;
+}
+
+export interface SkillCooldown {
+  skillId: string;
+  turnsRemaining: number;
 }
 
 // === Consumables ===
@@ -224,6 +282,17 @@ export interface Player {
   // for that dungeon yet (so only Novice is selectable). Used to gate
   // sequential difficulty unlocks.
   dungeonProgress: Record<string, Difficulty>;
+  // === Skills ===
+  // Unspent SP. Earned at 1 SP per level-up via tryLevelUp (see engine).
+  skillPoints: number;
+  // Map of skillId → current rank (1..maxRank). Absent key = not unlocked.
+  // Using a record (not string[]) so ranks survive structurally — no second
+  // schema for "rank info" that could drift out of sync with unlocks.
+  skillRanks: Record<string, number>;
+  // Ordered action bar (max 5). Each entry is a skillId the player has
+  // unlocked. Editing this is blocked while activeRun is non-null (enforced
+  // both server- and client-side; see store.equipSkill / unequipSkill).
+  equippedSkills: string[];
 }
 
 export interface SaveData {
@@ -233,7 +302,17 @@ export interface SaveData {
   version: number;
 }
 
-export const SAVE_VERSION = 4;
+export const SAVE_VERSION = 5;
+
+// Action-bar cap: enforced by store.equipSkill and rendered in UI.
+export const MAX_EQUIPPED_SKILLS = 5;
+
+// Combat-only baseline mana regen: 5% of maxMana per player turn-end,
+// with a floor of 1. See engine.regenMana / DungeonScreen combat hooks.
+export const MANA_REGEN_PCT = 0.05;
+
+// Respec cost per refunded SP, paid to the Skill Trainer.
+export const SKILL_RESPEC_GOLD_PER_SP = 50;
 
 export const TIER_COLORS: Record<Tier, string> = {
   common: "#e5e5e5",
