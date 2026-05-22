@@ -96,6 +96,31 @@ export function SkillTooltip({ skill, player, rank, children, side = "top", alig
               Shield: <span className="font-mono">{current.shield} dmg absorbed</span>
             </p>
           )}
+          {/* Special-effect annotations */}
+          {current.bonusHealOnCast != null && current.bonusHealOnCast > 0 && (
+            <p className="text-emerald-300">
+              Also heals: <span className="font-mono">+{current.bonusHealOnCast} HP</span> on cast
+            </p>
+          )}
+          {(current.lifestealPct != null && current.lifestealPct > 0) && (
+            <p className="text-violet-300">
+              Lifesteal: <span className="font-mono">{current.lifestealPct}%</span>
+              <span className="text-muted-foreground"> (gear + skill)</span>
+            </p>
+          )}
+          {(current.selfDamageCost != null && current.selfDamageCost > 0) && (
+            <p className="text-orange-400">
+              Cost: <span className="font-mono">−{current.selfDamageCost} HP</span> on cast
+            </p>
+          )}
+          {(current.selfDamagePctMaxHp != null && current.selfDamagePctMaxHp > 0) && (
+            <p className="text-orange-400">
+              Cost: <span className="font-mono">−{Math.round(current.selfDamagePctMaxHp * 100)}% Max HP</span> on cast
+            </p>
+          )}
+          {current.refundCdOnKill && (
+            <p className="text-amber-300">Cooldown refunds if target dies</p>
+          )}
         </div>
 
         {/* Next rank preview — the headline of the rank system */}
@@ -110,7 +135,10 @@ export function SkillTooltip({ skill, player, rank, children, side = "top", alig
                 Required: Level {nextLevelReq} (you are {player.level})
               </p>
             )}
-            {next.scalingText && <p className="text-foreground/90">{next.scalingText}</p>}
+            {/* Show scaling text only if it changed between ranks */}
+            {next.scalingText && next.scalingText !== current.scalingText && (
+              <p className="text-foreground/90">{next.scalingText}</p>
+            )}
             {next.damage > 0 && current.damage > 0 && (
               <p className="text-rose-200">
                 Damage: <span className="font-mono">{current.damage}</span> → <span className="font-mono text-rose-100">{next.damage}</span>
@@ -120,11 +148,18 @@ export function SkillTooltip({ skill, player, rank, children, side = "top", alig
             {next.heal > 0 && current.heal > 0 && (
               <p className="text-emerald-200">
                 Heal: <span className="font-mono">{current.heal}</span> → <span className="font-mono text-emerald-100">{next.heal}</span>
+                <span className="text-muted-foreground"> (+{next.heal - current.heal})</span>
               </p>
             )}
             {next.shield > 0 && current.shield > 0 && (
               <p className="text-sky-200">
                 Shield: <span className="font-mono">{current.shield}</span> → <span className="font-mono text-sky-100">{next.shield}</span>
+                <span className="text-muted-foreground"> (+{next.shield - current.shield})</span>
+              </p>
+            )}
+            {next.bonusHealOnCast != null && current.bonusHealOnCast != null && next.bonusHealOnCast !== current.bonusHealOnCast && (
+              <p className="text-emerald-200">
+                Bonus heal: <span className="font-mono">{current.bonusHealOnCast}</span> → <span className="font-mono text-emerald-100">{next.bonusHealOnCast}</span>
               </p>
             )}
             {next.manaCost !== current.manaCost && (

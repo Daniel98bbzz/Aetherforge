@@ -4,7 +4,7 @@ import type {
   QuestDef, QuestObjective, QuestState, RoomState, SkillCooldown,
   SkillNode, Tier, TraderDef,
 } from "./types";
-import { DIFFICULTY_ORDER, MANA_REGEN_PCT, TIER_ORDER, TIER_VALUE } from "./types";
+import { DIFFICULTY_ORDER, MANA_REGEN_PCT, PATH_CHOICE_LEVEL, TIER_ORDER, TIER_VALUE } from "./types";
 import { AFFIX_POOL, CONSUMABLES, DUNGEONS, ITEMS, MONSTERS, SKILL_TREE } from "./data";
 
 export const rand = (min: number, max: number) => Math.random() * (max - min) + min;
@@ -776,6 +776,12 @@ export interface SkillPreview {
   shield: number;
   buffText?: string;
   scalingText?: string;     // "Deals 150% of STR as damage"
+  // Special-effect annotations shown in the tooltip
+  lifestealPct?: number;        // gear lifesteal + skill bonus lifesteal
+  selfDamageCost?: number;      // flat HP deducted on cast
+  selfDamagePctMaxHp?: number;  // fraction of max HP deducted on cast (e.g. 0.20)
+  bonusHealOnCast?: number;     // flat HP healed alongside another effect (Aegis of Light)
+  refundCdOnKill?: boolean;     // cooldown refunds when target dies (Carnage)
 }
 
 export function previewSkill(player: Player, node: SkillNode, rank: number): SkillPreview {
@@ -822,9 +828,34 @@ export function previewSkill(player: Player, node: SkillNode, rank: number): Ski
     out.scalingText = `Absorbs ${out.shield} damage`;
   } else if (node.effect.kind === "buff_stat") {
     const dur = node.effect.duration ?? 3;
-    out.buffText = `+${Math.round(r.magnitude)} ${(node.effect.buffKind ?? "stat").replace("buff_","").toUpperCase()} for ${dur} turns`;
-    out.scalingText = out.buffText;
+    if (node.effect.buffKind === "cheat_death") {
+      // Give a human-readable description instead of "+1 CHEAT_DEATH for 99 turns"
+      out.buffText    = "Survive the next lethal blow at 1 HP";
+      out.scalingText = "Survive the next lethal blow at 1 HP";
+    } else {
+      out.buffText = `+${Math.round(r.magnitude)} ${(node.effect.buffKind ?? "stat").replace("buff_","").toUpperCase()} for ${dur} turns`;
+      out.scalingText = out.buffText;
+    }
   }
+
+  // === Special-effect annotations for the tooltip ===
+  // Self-damage costs (Reckless Strike, Demonic Pact, etc.)
+  if (node.effect.selfDamage && node.effect.selfDamage > 0)
+    out.selfDamageCost = node.effect.selfDamage;
+  if (node.effect.selfDamagePctMaxHp && node.effect.selfDamagePctMaxHp > 0)
+    out.selfDamagePctMaxHp = node.effect.selfDamagePctMaxHp;
+
+  // Lifesteal: gear baseline + any skill bonus
+  if (node.effect.bonusLifestealPct && node.effect.bonusLifestealPct > 0)
+    out.lifestealPct = s.lifesteal + node.effect.bonusLifestealPct;
+
+  // Combo heal alongside shield (Aegis of Light, Runic Ward, etc.)
+  if (node.effect.bonusHealPctMaxHp && node.effect.bonusHealPctMaxHp > 0)
+    out.bonusHealOnCast = Math.round(player.maxHp * node.effect.bonusHealPctMaxHp);
+
+  // CD-refund-on-kill badge (Carnage, Rapid Reload, etc.)
+  if (node.effect.refundCdOnKill) out.refundCdOnKill = true;
+
   return out;
 }
 
@@ -1015,7 +1046,8 @@ export function skillRankUpBlocker(player: Player, node: SkillNode): string | nu
   if (node.path !== undefined) {
     const chosen = player.classPaths?.[player.charClass];
     if (chosen === undefined) {
-      return `Choose your path first (level ${player.level >= 15 ? "now available" : "15"}).`;
+      const threshold = PATH_CHOICE_LEVEL[player.charClass];
+      return `Choose your path first (level ${player.level >= threshold ? "now available" : threshold}).`;
     }
     if (chosen !== node.path) {
       return `Locked to a different path.`;

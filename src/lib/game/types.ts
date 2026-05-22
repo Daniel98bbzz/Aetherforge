@@ -101,11 +101,11 @@ export interface SkillScaling {
   pctPerRank: number;
 }
 
-// Class specializations. Only Warrior has paths in this iteration; Ranger
-// and Sorcerer keep base-class-only trees for now. The union type leaves
-// room for future expansion without touching consumers.
-export type WarriorPath = "dark_knight" | "guardian";
-export type ClassPath = WarriorPath;
+// Class specializations. Each class has two paths chosen at level 15.
+export type WarriorPath  = "dark_knight" | "guardian";
+export type RangerPath   = "sharpshooter" | "shadowbow";
+export type SorcererPath = "pyromancer" | "sage";
+export type ClassPath    = WarriorPath | RangerPath | SorcererPath;
 
 export interface PathDef {
   id: ClassPath;
@@ -387,12 +387,10 @@ export const SKILL_RESPEC_GOLD_PER_SP = 50;
 
 // Player level at which each class must choose a specialization path.
 // Surfaced in the Trainer UI to telegraph the choice well before it triggers.
-// Only Warrior is implemented this round; Ranger/Sorcerer values exist for
-// type-completeness but are gated to "never" (level > xpToNext realistic max).
 export const PATH_CHOICE_LEVEL: Record<CharClass, number> = {
-  warrior: 15,
-  ranger: 999,
-  sorcerer: 999,
+  warrior:  15,
+  ranger:   15,
+  sorcerer: 15,
 };
 
 // Flat surcharge on top of the standard SP refund when ABANDONING a path

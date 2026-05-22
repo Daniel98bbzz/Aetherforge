@@ -136,7 +136,7 @@ export function TraderModal({ traderId, onClose }: Props) {
           <div className="space-y-2">
             <p className="text-xs text-muted-foreground">Sells at 40% of item value. Equipped items cannot be sold — unequip first.</p>
 
-            {isSmith && p.inventory.length > 0 && (
+            {p.inventory.length > 0 && (
               <Card className="p-3 bg-card/40 border-amber-500/30">
                 <div className="text-xs font-serif text-amber-300 mb-2">Bulk Sell</div>
                 <div className="flex flex-wrap gap-2">
