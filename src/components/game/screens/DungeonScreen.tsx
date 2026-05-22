@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
-  applySkill, availableDifficulties, consumeShield, cooldownOf, DIFF_INDEX,
+  applyCheatDeath, applySkill, availableDifficulties, consumeShield, cooldownOf, DIFF_INDEX,
   generateItem, monsterAttack, playerAttack, regenMana, rollTier,
   startCooldown, statCheck, statCheckChance, ROOM_DC, tickBuffs, tickCooldowns,
 } from "@/lib/game/engine";
@@ -506,16 +506,21 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
 
   // A player action returns the deltas to apply to the player + monster
   // after their move. Skill outcomes may also carry a self-heal, a buff to
-  // grant, or a cooldown to start (cooldownSkillId / cooldownTurns).
+  // grant, a cooldown to start, an HP self-damage cost (Reckless Strike /
+  // Demonic Pact), a refund-cooldown-on-kill flag (Carnage), or a
+  // once-per-run skill id to record (Indomitable).
   interface TurnAction {
     dmg: number;                  // damage dealt to the monster
     logLine: string;
     lifesteal?: number;
     manaCost?: number;
+    selfDamage?: number;          // HP cost paid on cast
     selfHeal?: number;
     grantBuff?: ActiveBuff;
     cooldownSkillId?: string;
     cooldownTurns?: number;
+    refundCdOnKill?: boolean;
+    oncePerRunSkillId?: string;
   }
 
   const doTurn = async (playerAction: () => TurnAction | null) => {
@@ -531,6 +536,11 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
     setPlayer((pp) => {
       let next = { ...pp };
       if (res.manaCost) next.mana = Math.max(0, next.mana - res.manaCost);
+      if (res.selfDamage && res.selfDamage > 0) {
+        // Clamp to 1 HP — a skill cannot suicide the caster on their own turn.
+        // The monster can still finish them off; this is just a safety floor.
+        next.hp = Math.max(1, next.hp - res.selfDamage);
+      }
       if (res.selfHeal) next.hp = Math.min(next.maxHp, next.hp + res.selfHeal);
       if (res.grantBuff) {
         const filtered = next.activeBuffs.filter(b => !(b.kind === res.grantBuff!.kind && b.source === res.grantBuff!.source));
@@ -544,6 +554,10 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
     if (res.cooldownSkillId && res.cooldownTurns && res.cooldownTurns > 0) {
       updateActiveRun(r => startCooldown(r, res.cooldownSkillId!, res.cooldownTurns!));
     }
+    if (res.oncePerRunSkillId) {
+      const sid = res.oncePerRunSkillId;
+      updateActiveRun(r => ({ ...r, oncePerRunUsed: [...(r.oncePerRunUsed ?? []), sid] }));
+    }
 
     const newHp = monsterHp - res.dmg;
     setMonsterHp(newHp);
@@ -552,6 +566,13 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
       pushLog(`  ↳ You drink ${res.lifesteal} life.`);
     }
     if (newHp <= 0) {
+      // Refund the cooldown if the killing blow was a Carnage-style skill.
+      // Done before the kill side effects so the player can immediately cast
+      // it again on the next monster (the fantasy is "executions feed momentum").
+      if (res.refundCdOnKill && res.cooldownSkillId) {
+        updateActiveRun(r => startCooldown(r, res.cooldownSkillId!, 0));
+        pushLog(`  ↳ Execution! ${res.cooldownSkillId.toUpperCase()} cooldown refunded.`);
+      }
       const goldMult = (save!.player.activeBuffs ?? []).some((b) => b.kind === "gold_boost") ? 2 : 1;
       const goldGain = monster.gold * goldMult;
       pushLog(`✦ ${monster.name} crumples. +${monster.xp} xp, +${goldGain} gold.`);
@@ -581,9 +602,15 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
       setPlayer((pp) => {
         const { player: shielded, absorbed, remaining } = consumeShield(pp, a.damage);
         if (absorbed > 0) queueMicrotask(() => pushLog(`  ↳ ${shielded.activeBuffs.find(b => b.kind === "shield")?.source ?? "Shield"} absorbs ${absorbed} damage.`));
-        const nextHp = shielded.hp - remaining;
-        died = nextHp <= 0;
-        return tickBuffs({ ...shielded, hp: Math.max(0, nextHp) });
+        const proposedHp = shielded.hp - remaining;
+        // Indomitable interception — if the hit would be lethal and a
+        // cheat_death buff is active, consume it and survive at 1 HP.
+        const cheat = applyCheatDeath(shielded, proposedHp);
+        if (cheat.saved) {
+          queueMicrotask(() => pushLog("  ↳ ✦ Indomitable! Your will refuses death."));
+        }
+        died = cheat.nextHp <= 0;
+        return tickBuffs({ ...cheat.player, hp: Math.max(0, cheat.nextHp) });
       });
       // Tick cooldowns once per full exchange (player turn + monster turn).
       // A "3-turn cooldown" therefore means three full exchanges, which
@@ -614,19 +641,33 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
     if (rank < 1) { toast.error(`${node.name} is not unlocked.`); return null; }
     const cd = cooldownOf(run, node.id);
     if (cd > 0) { toast.error(`${node.name} on cooldown (${cd}t).`); return null; }
+    if (node.oncePerRun && (run.oncePerRunUsed ?? []).includes(node.id)) {
+      toast.error(`${node.name} has already been used this run.`);
+      return null;
+    }
     const stepsAbove = Math.max(0, rank - 1);
     const manaCost = node.baseManaCost + node.manaCostPerRank * stepsAbove;
     if (save!.player.mana < manaCost) { toast.error("Not enough mana."); return null; }
     const res = applySkill(save!.player, monster, node, rank);
+    // Self-damage skills must leave the caster alive after paying their cost.
+    // We clamp in doTurn as a safety net but also pre-check here for a clean
+    // error message ("Casting Reckless Strike would kill you").
+    if (res.selfDamageCost > 0 && save!.player.hp - res.selfDamageCost <= 0) {
+      toast.error(`Casting ${node.name} would kill you (-${res.selfDamageCost} HP).`);
+      return null;
+    }
     return {
       dmg: res.damage,
       logLine: res.log,
       lifesteal: res.lifesteal,
       manaCost,
+      selfDamage: res.selfDamageCost > 0 ? res.selfDamageCost : undefined,
       selfHeal: res.heal > 0 ? res.heal : undefined,
       grantBuff: res.buff,
       cooldownSkillId: node.id,
       cooldownTurns: node.cooldown,
+      refundCdOnKill: res.refundCdOnKill,
+      oncePerRunSkillId: node.oncePerRun ? node.id : undefined,
     };
   };
 
@@ -682,7 +723,14 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
             const cdLeft = cooldownOf(run, node.id);
             const stepsAbove = Math.max(0, rank - 1);
             const manaCost = node.baseManaCost + node.manaCostPerRank * stepsAbove;
-            const disabled = busy || cdLeft > 0 || save!.player.mana < manaCost;
+            const usedOncePerRun = node.oncePerRun && (run.oncePerRunUsed ?? []).includes(node.id);
+            const disabled = busy || cdLeft > 0 || save!.player.mana < manaCost || !!usedOncePerRun;
+            // Sublabel priority: once-per-run-used > cooldown > cost.
+            const sublabel = usedOncePerRun
+              ? "Used this run"
+              : cdLeft > 0
+                ? `CD ${cdLeft}t`
+                : `${manaCost} MP · R${rank}`;
             return (
               <SkillTooltip key={node.id} skill={node} player={save!.player} rank={rank} side="top">
                 <Button
@@ -693,9 +741,7 @@ function CombatView({ room, onResolve }: { room: RoomState; onResolve: (r: { vic
                 >
                   <span className="flex flex-col items-center leading-tight">
                     <span className="text-xs">{node.name}</span>
-                    <span className="text-[10px] text-muted-foreground">
-                      {cdLeft > 0 ? `CD ${cdLeft}t` : `${manaCost} MP · R${rank}`}
-                    </span>
+                    <span className="text-[10px] text-muted-foreground">{sublabel}</span>
                   </span>
                 </Button>
               </SkillTooltip>

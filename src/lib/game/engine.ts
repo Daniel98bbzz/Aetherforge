@@ -793,11 +793,27 @@ export function previewSkill(player: Player, node: SkillNode, rank: number): Ski
     const stat = node.effect.scaling.stat;
     const statVal = stat === "weaponPower" ? s.weaponPower : (s as any)[stat] ?? 0;
     const fireMult = 1 + (s.fireBonus ?? 0) / 100;
-    const base = (s.weaponPower + statVal) * (r.scalingPct / 100);
+    let base = (s.weaponPower + statVal) * (r.scalingPct / 100);
+    let secText = "";
+    if (node.effect.secondaryScaling) {
+      const sec = node.effect.secondaryScaling;
+      const secStat = sec.stat === "weaponPower" ? s.weaponPower : (s as any)[sec.stat] ?? 0;
+      const secPct = sec.basePct + sec.pctPerRank * (r.rank - 1);
+      base += (s.weaponPower + secStat) * (secPct / 100);
+      secText = ` + ${secPct}% ${sec.stat.toUpperCase()}`;
+    }
+    const cond = node.effect.conditionalDamageBonus;
+    let condText = "";
+    if (cond && cond.when === "self_hp_above") {
+      const hpFrac = player.maxHp > 0 ? player.hp / player.maxHp : 0;
+      const active = hpFrac >= cond.threshold;
+      if (active) base *= 1 + cond.bonusPct / 100;
+      condText = ` · +${cond.bonusPct}% if HP ≥ ${Math.round(cond.threshold * 100)}% (${active ? "active" : "inactive"})`;
+    }
     out.damage = Math.round(base * 1.20 * fireMult);
     out.damageMin = Math.round(base * 1.10 * fireMult);
     out.damageMax = Math.round(base * 1.30 * fireMult);
-    out.scalingText = `Deals ${r.scalingPct}% of ${stat.toUpperCase()} as damage`;
+    out.scalingText = `Deals ${r.scalingPct}% ${stat.toUpperCase()}${secText}${condText}`;
   } else if (node.effect.kind === "heal") {
     out.heal = Math.round(player.maxHp * r.magnitude);
     out.scalingText = `Restores ${Math.round(r.magnitude * 100)}% of Max HP`;
@@ -818,34 +834,68 @@ export interface SkillUseResult {
   lifesteal: number;
   heal: number;
   buff?: ActiveBuff;
+  // Self-damage cost (Reckless Strike / Demonic Pact). Caller subtracts from
+  // player HP; clamped to leave at least 1 HP so a skill can't outright suicide.
+  selfDamageCost: number;
+  // True if this skill is configured to refund its cooldown on kill (Carnage).
+  // The caller checks this against the kill outcome of the same turn.
+  refundCdOnKill: boolean;
   log: string;
 }
 
 /**
  * Resolve a skill use against a target. Pure: returns the numbers and the
  * log line; mutating the player/run is the caller's job. Mirrors
- * playerAttack's pipeline (variance, crit, lifesteal, fire mult, defense).
+ * playerAttack's pipeline (variance, crit, lifesteal, fire mult, defense)
+ * and folds in the path-skill modifiers (secondary scaling, conditional
+ * damage bonus, bonus lifesteal, self-damage).
  */
 export function applySkill(player: Player, target: Monster | null, node: SkillNode, rank: number): SkillUseResult {
   const s = computeStats(player);
   const r = skillStatsAtRank(node, rank);
   const out: SkillUseResult = {
     damage: 0, crit: false, lifesteal: 0, heal: 0,
+    selfDamageCost: 0,
+    refundCdOnKill: !!node.effect.refundCdOnKill,
     log: `You use ${node.name} (Rank ${r.rank}).`,
   };
+
+  // Self-damage component (computed first so we can include it in the log).
+  const selfFlat = node.effect.selfDamage ?? 0;
+  const selfPct = node.effect.selfDamagePctMaxHp ?? 0;
+  out.selfDamageCost = Math.round(selfFlat + selfPct * player.maxHp);
 
   if (node.effect.kind === "damage" && node.effect.scaling && target) {
     const stat = node.effect.scaling.stat;
     const statVal = stat === "weaponPower" ? s.weaponPower : (s as any)[stat] ?? 0;
     const variance = 1 + rand(0.1, 0.3);
     const fireMult = 1 + (s.fireBonus ?? 0) / 100;
-    let dmg = Math.max(
-      1,
-      Math.round((s.weaponPower + statVal) * (r.scalingPct / 100) * variance * fireMult) - target.defense,
-    );
+    // Base damage: (weaponPower + primary stat) × (rank's scaling %)
+    let base = (s.weaponPower + statVal) * (r.scalingPct / 100);
+
+    // Secondary scaling (Shield Slam, Sun Hammer). Additive to base, not
+    // multiplicative — keeps the math intuitive in the tooltip preview.
+    if (node.effect.secondaryScaling) {
+      const sec = node.effect.secondaryScaling;
+      const secStat = sec.stat === "weaponPower" ? s.weaponPower : (s as any)[sec.stat] ?? 0;
+      const secPct = sec.basePct + sec.pctPerRank * (r.rank - 1);
+      base += (s.weaponPower + secStat) * (secPct / 100);
+    }
+
+    // Conditional damage multiplier (Sun Hammer: +50% if hp >= 80% maxHp).
+    const cond = node.effect.conditionalDamageBonus;
+    if (cond && cond.when === "self_hp_above") {
+      const hpFrac = player.maxHp > 0 ? player.hp / player.maxHp : 0;
+      if (hpFrac >= cond.threshold) {
+        base *= 1 + cond.bonusPct / 100;
+      }
+    }
+
+    let dmg = Math.max(1, Math.round(base * variance * fireMult) - target.defense);
     const crit = Math.random() * 100 < s.critChance;
     if (crit) dmg = Math.round(dmg * 1.8);
-    const lifesteal = Math.round((dmg * s.lifesteal) / 100);
+    const baseLifesteal = (s.lifesteal + (node.effect.bonusLifestealPct ?? 0)) / 100;
+    const lifesteal = Math.round(dmg * baseLifesteal);
     out.damage = dmg;
     out.crit = crit;
     out.lifesteal = lifesteal;
@@ -863,6 +913,11 @@ export function applySkill(player: Player, target: Monster | null, node: SkillNo
       turnsLeft: node.effect.duration ?? 99,
     };
     out.log = `${node.name} envelops you — ${out.buff.magnitude} damage shielded.`;
+    // Combo skills (Aegis of Light): heal-on-cast in addition to the shield.
+    if (node.effect.bonusHealPctMaxHp && node.effect.bonusHealPctMaxHp > 0) {
+      out.heal = Math.round(player.maxHp * node.effect.bonusHealPctMaxHp);
+      out.log += ` (+${out.heal} HP restored)`;
+    }
   } else if (node.effect.kind === "buff_stat" && node.effect.buffKind) {
     out.buff = {
       source: node.name,
@@ -873,6 +928,22 @@ export function applySkill(player: Player, target: Monster | null, node: SkillNo
     out.log = `${node.name} surges through you.`;
   }
   return out;
+}
+
+/**
+ * Consume an active cheat-death buff if lethal damage would land. Returns
+ * the post-intervention HP and a log line. If no cheat-death buff is
+ * active, returns the proposed nextHp unchanged.
+ *
+ * The Guardian capstone "Indomitable" grants this buff via the normal
+ * applySkill → buff_stat → ActiveBuff pipeline (buffKind: cheat_death).
+ */
+export function applyCheatDeath(p: Player, proposedNextHp: number): { player: Player; nextHp: number; saved: boolean } {
+  if (proposedNextHp > 0) return { player: p, nextHp: proposedNextHp, saved: false };
+  const idx = (p.activeBuffs ?? []).findIndex((b) => b.kind === "cheat_death" && b.magnitude > 0);
+  if (idx < 0) return { player: p, nextHp: proposedNextHp, saved: false };
+  const newBuffs = p.activeBuffs.filter((_, i) => i !== idx);
+  return { player: { ...p, activeBuffs: newBuffs }, nextHp: 1, saved: true };
 }
 
 /**
@@ -892,13 +963,72 @@ export function totalSpentSP(player: Player): number {
 }
 
 /**
+ * Player level required to reach a given target rank (1..maxRank).
+ * Combines node.minLevel (flat unlock floor) with the per-rank schedule.
+ * Defaults to 1 if no gating is defined — preserves Ranger/Sorcerer skills
+ * that pre-date the level-gating system.
+ */
+export function requiredLevelForRank(node: SkillNode, targetRank: number): number {
+  if (targetRank < 1) return 1;
+  const perRank = node.levelRequirementPerRank?.[targetRank - 1] ?? 0;
+  const flat = targetRank === 1 ? (node.minLevel ?? 0) : 0;
+  return Math.max(1, perRank, flat);
+}
+
+/**
+ * Whether a skill is currently visible in the Trainer UI for this player.
+ * Base skills (no `path`) are always visible. Path-locked skills are
+ * visible only after the player has chosen the matching path. Pre-choice,
+ * path skills are hidden entirely to keep the tree readable.
+ */
+export function isSkillVisible(player: Player, node: SkillNode): boolean {
+  if (node.path === undefined) return true;
+  const chosen = player.classPaths?.[player.charClass];
+  if (chosen === undefined) return false;
+  return chosen === node.path;
+}
+
+/**
+ * Whether a skill is path-equippable for the player. Used by equipSkill to
+ * refuse "wrong path" skills even if rank survived a partial respec.
+ */
+export function isSkillEquippableByPath(player: Player, node: SkillNode): boolean {
+  if (node.path === undefined) return true;
+  const chosen = player.classPaths?.[player.charClass];
+  return chosen === node.path;
+}
+
+/**
  * Can the player learn / rank up this skill right now?
  * Returns the reason it's blocked (or null if allowed) so the UI can
  * surface the same gating rules without duplicating the logic.
+ *
+ * Check order matters — the message shown to the player is the first
+ * blocker found, so the order goes "most informative" first (path lock
+ * and level gate are loud, prereqs are softer).
  */
 export function skillRankUpBlocker(player: Player, node: SkillNode): string | null {
   const currentRank = player.skillRanks?.[node.id] ?? 0;
   if (currentRank >= node.maxRank) return "Already at max rank.";
+
+  // Path lock — path skills only available to players who chose that path.
+  if (node.path !== undefined) {
+    const chosen = player.classPaths?.[player.charClass];
+    if (chosen === undefined) {
+      return `Choose your path first (level ${player.level >= 15 ? "now available" : "15"}).`;
+    }
+    if (chosen !== node.path) {
+      return `Locked to a different path.`;
+    }
+  }
+
+  // Level gate for the rank being purchased
+  const targetRank = currentRank + 1;
+  const reqLevel = requiredLevelForRank(node, targetRank);
+  if (player.level < reqLevel) {
+    return `Requires level ${reqLevel} (you are ${player.level}).`;
+  }
+
   const cost = node.rankCosts[currentRank];
   if (player.skillPoints < cost) return `Need ${cost} SP (have ${player.skillPoints}).`;
   if (currentRank === 0) {

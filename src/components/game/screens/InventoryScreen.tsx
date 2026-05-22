@@ -312,12 +312,16 @@ function SkillPickerList({ onPick, inRun }: { onPick: (id: string) => void; inRu
   const { save } = useGame();
   if (!save) return null;
   const p = save.player;
-  // Unlocked but not yet equipped, filtered to the player's class.
+  // Unlocked but not yet equipped, filtered to the player's class. After
+  // a partial respec the player might still own ranks in path skills they
+  // can no longer equip — we filter those out here so the UI doesn't show
+  // dead options.
   const candidates = SKILL_TREE.filter(
     (s) =>
       s.charClass === p.charClass &&
       (p.skillRanks[s.id] ?? 0) >= 1 &&
-      !p.equippedSkills.includes(s.id),
+      !p.equippedSkills.includes(s.id) &&
+      (s.path === undefined || p.classPaths?.[p.charClass] === s.path),
   );
   if (candidates.length === 0) {
     return (

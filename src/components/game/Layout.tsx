@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Home, Swords, Backpack, User, Hammer, BookOpen, Trophy, Settings, Coins, Sparkles, GraduationCap } from "lucide-react";
-import { useGame } from "@/lib/game/store";
+import { useGame, PATHS } from "@/lib/game/store";
 import { Button } from "@/components/ui/button";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -23,6 +23,8 @@ export function GameLayout({ view, setView, children, locked }: { view: View; se
   const [open, setOpen] = useState(false);
   if (!save) return null;
   const p = save.player;
+  const chosenPath = p.classPaths?.[p.charClass];
+  const pathDef = chosenPath ? PATHS.find((d) => d.id === chosenPath) : undefined;
 
   return (
     <TooltipProvider delayDuration={200}>
@@ -70,6 +72,15 @@ export function GameLayout({ view, setView, children, locked }: { view: View; se
             <div className="flex-1 flex items-center gap-3 flex-wrap text-sm">
               <span className="font-serif text-primary">{p.name}</span>
               <span className="text-muted-foreground">Lv {p.level}</span>
+              {pathDef && (
+                <span
+                  className="px-1.5 py-0.5 text-[10px] rounded uppercase tracking-widest border"
+                  style={{ color: pathDef.color, borderColor: `${pathDef.color}66`, backgroundColor: `${pathDef.color}11` }}
+                  title={pathDef.tagline}
+                >
+                  {pathDef.name.replace("Path of the ", "")}
+                </span>
+              )}
               <span className="flex items-center gap-1 text-amber-400"><Coins className="w-3.5 h-3.5"/> {p.gold}</span>
               <span className="flex items-center gap-1 text-sky-400"><Sparkles className="w-3.5 h-3.5"/> Power {power}</span>
               {p.hardcore && <span className="px-1.5 py-0.5 text-[10px] rounded bg-destructive/20 text-destructive border border-destructive/40">HARDCORE</span>}

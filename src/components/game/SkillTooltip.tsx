@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { HoverCard, HoverCardContent, HoverCardTrigger } from "@/components/ui/hover-card";
-import { previewSkill, skillStatsAtRank } from "@/lib/game/engine";
+import { previewSkill, requiredLevelForRank, skillStatsAtRank } from "@/lib/game/engine";
+import { PATHS } from "@/lib/game/data";
 import type { Player, SkillNode } from "@/lib/game/types";
 
 interface Props {
@@ -23,6 +24,9 @@ export function SkillTooltip({ skill, player, rank, children, side = "top", alig
   const hasNext = rank > 0 && rank < skill.maxRank;
   const next = hasNext ? previewSkill(player, skill, rank + 1) : null;
   const nextCost = hasNext ? skill.rankCosts[rank] : null;
+  const currentLevelReq = requiredLevelForRank(skill, effectiveRank);
+  const nextLevelReq = hasNext ? requiredLevelForRank(skill, rank + 1) : null;
+  const pathDef = skill.path ? PATHS.find((p) => p.id === skill.path) : undefined;
 
   return (
     <HoverCard openDelay={120} closeDelay={80}>
@@ -36,9 +40,19 @@ export function SkillTooltip({ skill, player, rank, children, side = "top", alig
       >
         <div className="flex items-center justify-between gap-2">
           <div className="font-serif text-amber-300 text-base leading-tight">{skill.name}</div>
-          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
-            {skill.charClass} · T{skill.position.tier}
-          </span>
+          <div className="flex flex-col items-end gap-0.5">
+            <span className="text-[10px] uppercase tracking-widest text-muted-foreground">
+              {skill.charClass} · T{skill.position.tier}
+            </span>
+            {pathDef && (
+              <span
+                className="text-[10px] uppercase tracking-widest px-1.5 py-0.5 rounded border"
+                style={{ color: pathDef.color, borderColor: `${pathDef.color}66`, backgroundColor: `${pathDef.color}11` }}
+              >
+                {pathDef.name.replace("Path of the ", "")}
+              </span>
+            )}
+          </div>
         </div>
 
         <p className="text-xs text-foreground/80 leading-snug">{skill.description}</p>
@@ -55,8 +69,14 @@ export function SkillTooltip({ skill, player, rank, children, side = "top", alig
             <span className="text-muted-foreground">
               Mana {current.manaCost}
               {skill.cooldown > 0 && <span> · CD {skill.cooldown}t</span>}
+              {skill.oncePerRun && <span> · Once / run</span>}
             </span>
           </div>
+          {currentLevelReq > 1 && (
+            <p className={player.level >= currentLevelReq ? "text-muted-foreground" : "text-rose-400"}>
+              Required: Level {currentLevelReq} (you are {player.level})
+            </p>
+          )}
           {current.scalingText && (
             <p className="text-foreground/90">{current.scalingText}</p>
           )}
@@ -85,6 +105,11 @@ export function SkillTooltip({ skill, player, rank, children, side = "top", alig
               <span className="font-serif text-amber-300">Next Rank ({rank + 1})</span>
               <span className="text-amber-400">Cost: {nextCost} SP</span>
             </div>
+            {nextLevelReq !== null && nextLevelReq > 1 && (
+              <p className={player.level >= nextLevelReq ? "text-muted-foreground" : "text-rose-400"}>
+                Required: Level {nextLevelReq} (you are {player.level})
+              </p>
+            )}
             {next.scalingText && <p className="text-foreground/90">{next.scalingText}</p>}
             {next.damage > 0 && current.damage > 0 && (
               <p className="text-rose-200">

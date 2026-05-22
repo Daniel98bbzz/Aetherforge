@@ -78,9 +78,14 @@ export interface ActiveRun {
   // automatically on every endRun (victory / retreat / defeat) — matching
   // the design contract "every new dungeon run starts with 0 cooldowns".
   cooldowns: SkillCooldown[];
+  // Skill IDs that have already been activated this run, when the skill is
+  // flagged oncePerRun. Capstone skills like Indomitable belong here — they
+  // intentionally do NOT use the normal cooldown system because we want the
+  // restriction tied to the run's lifecycle, not a turn counter.
+  oncePerRunUsed: string[];
 }
 
-// === Skills (Skill Tree, Ranks, Cooldowns) ===
+// === Skills (Skill Tree, Ranks, Cooldowns, Paths) ===
 export type SkillKind =
   | "active_attack"   // does damage; uses player's combat damage pipeline
   | "active_heal"     // restores HP
@@ -96,6 +101,24 @@ export interface SkillScaling {
   pctPerRank: number;
 }
 
+// Class specializations. Only Warrior has paths in this iteration; Ranger
+// and Sorcerer keep base-class-only trees for now. The union type leaves
+// room for future expansion without touching consumers.
+export type WarriorPath = "dark_knight" | "guardian";
+export type ClassPath = WarriorPath;
+
+export interface PathDef {
+  id: ClassPath;
+  charClass: CharClass;
+  name: string;
+  tagline: string;
+  description: string;
+  identity: string;
+  strengths: string[];
+  weaknesses: string[];
+  color: string;          // hex for headers / borders / dot
+}
+
 export interface SkillEffect {
   kind: "damage" | "heal" | "shield" | "buff_stat";
   // Base value at rank 1. For "damage": damage-multiplier seed (also see
@@ -105,7 +128,30 @@ export interface SkillEffect {
   magnitudePerRank: number;
   scaling?: SkillScaling;
   duration?: number;             // turns (for buff_stat / shield)
-  buffKind?: ConsumableKind;     // reuses ActiveBuff plumbing (buff_str/agi/int/vit/shield)
+  buffKind?: ConsumableKind;     // reuses ActiveBuff plumbing (buff_str/agi/int/vit/shield/cheat_death)
+
+  // ====== Path-skill modifiers (all optional, all data-driven) ======
+  // Self-damage paid on cast. Stacks with selfDamagePctMaxHp.
+  // Used by Reckless Strike (flat) and Demonic Pact (percent).
+  selfDamage?: number;
+  selfDamagePctMaxHp?: number;
+  // Extra lifesteal % applied on top of any gear lifesteal (Soul Drain).
+  bonusLifestealPct?: number;
+  // Secondary stat scaling added on top of primary (Shield Slam: STR + VIT;
+  // Sun Hammer: STR + VIT).
+  secondaryScaling?: SkillScaling;
+  // If the hit kills the target, the skill's cooldown is wiped (Carnage).
+  refundCdOnKill?: boolean;
+  // Conditional damage multiplier. Sun Hammer: "+50% damage if at >= 80% HP".
+  // The engine evaluates `when` against the player at cast time.
+  conditionalDamageBonus?: {
+    when: "self_hp_above";
+    threshold: number;     // 0..1 fraction of maxHp
+    bonusPct: number;      // e.g., 50 = +50% damage
+  };
+  // Heal-on-cast applied IN ADDITION to the main effect (Aegis of Light:
+  // shield + heal). Expressed as a fraction of maxHp.
+  bonusHealPctMaxHp?: number;
 }
 
 export interface SkillNode {
@@ -127,6 +173,21 @@ export interface SkillNode {
   requires: string[];
   position: { tier: 1 | 2 | 3; col: number };
   flavor?: string;
+
+  // ====== Specialization & level gating (all optional) ======
+  // undefined = base-class skill (always visible); a ClassPath = visible
+  // and equippable only to players who chose that path.
+  path?: ClassPath;
+  // Player level required to reach rank N+1. Length should equal maxRank.
+  // Each rank's gate is independent. Already-purchased ranks are grandfathered.
+  levelRequirementPerRank?: number[];
+  // Flat minimum level just to UNLOCK (rank 1). Combined with the rank-1
+  // entry of levelRequirementPerRank via max().
+  minLevel?: number;
+  // Skill can only be activated ONCE per dungeon run. Tracked on
+  // ActiveRun.oncePerRunUsed so the restriction wipes between runs.
+  // Used by Indomitable (Guardian capstone).
+  oncePerRun?: boolean;
 }
 
 export interface SkillCooldown {
@@ -135,8 +196,13 @@ export interface SkillCooldown {
 }
 
 // === Consumables ===
+// Note: `cheat_death` is a SKILL-GRANTED buff kind only (Indomitable). It
+// shares the ActiveBuff plumbing for ticking/cleanup; no Consumable definition
+// should use it. The damage pipeline checks for an active cheat_death buff
+// before lethal damage and converts it into "saved at 1 HP" + buff consumed.
 export type ConsumableKind =
-  | "heal" | "mana" | "buff_str" | "buff_agi" | "buff_int" | "buff_vit" | "shield" | "gold_boost";
+  | "heal" | "mana" | "buff_str" | "buff_agi" | "buff_int" | "buff_vit" | "shield" | "gold_boost"
+  | "cheat_death";
 
 export interface Consumable {
   id: string;
@@ -293,6 +359,11 @@ export interface Player {
   // unlocked. Editing this is blocked while activeRun is non-null (enforced
   // both server- and client-side; see store.equipSkill / unequipSkill).
   equippedSkills: string[];
+  // The player's chosen path per class. Missing key = not yet chosen.
+  // Keyed by class so the system is forward-compatible with future
+  // multi-class flows (e.g., NG+ class swap that wants to remember which
+  // path the player had on each class). Cleared on Abandon Path.
+  classPaths: Partial<Record<CharClass, ClassPath>>;
 }
 
 export interface SaveData {
@@ -302,7 +373,7 @@ export interface SaveData {
   version: number;
 }
 
-export const SAVE_VERSION = 5;
+export const SAVE_VERSION = 6;
 
 // Action-bar cap: enforced by store.equipSkill and rendered in UI.
 export const MAX_EQUIPPED_SKILLS = 5;
@@ -313,6 +384,22 @@ export const MANA_REGEN_PCT = 0.05;
 
 // Respec cost per refunded SP, paid to the Skill Trainer.
 export const SKILL_RESPEC_GOLD_PER_SP = 50;
+
+// Player level at which each class must choose a specialization path.
+// Surfaced in the Trainer UI to telegraph the choice well before it triggers.
+// Only Warrior is implemented this round; Ranger/Sorcerer values exist for
+// type-completeness but are gated to "never" (level > xpToNext realistic max).
+export const PATH_CHOICE_LEVEL: Record<CharClass, number> = {
+  warrior: 15,
+  ranger: 999,
+  sorcerer: 999,
+};
+
+// Flat surcharge on top of the standard SP refund when ABANDONING a path
+// (switching specializations). The base SKILL_RESPEC_GOLD_PER_SP cost is
+// still paid for the refunded SP. Together they make path-swap a real
+// economic decision without being a permanent trap.
+export const PATH_RESPEC_GOLD = 2000;
 
 export const TIER_COLORS: Record<Tier, string> = {
   common: "#e5e5e5",

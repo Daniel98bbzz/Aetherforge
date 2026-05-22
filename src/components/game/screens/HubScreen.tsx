@@ -7,6 +7,7 @@ import { Swords, Backpack, Hammer, Trophy, Sparkles, ScrollText, Bed, Graduation
 import { TraderModal, TraderCard } from "../TraderModal";
 import { useState } from "react";
 import { describeObjective } from "@/lib/game/engine";
+import { PATH_CHOICE_LEVEL } from "@/lib/game/types";
 
 export function HubScreen({ setView }: { setView: (v: View) => void }) {
   const { save, claimDaily, turnInQuest, startNewGamePlus, restAtInn, restAtInnFree, innCost, canUseMercyCot } = useGame();
@@ -18,6 +19,12 @@ export function HubScreen({ setView }: { setView: (v: View) => void }) {
   const ngpUnlocked = p.unlockedFeatures.includes("new_game_plus");
   const fullyRested = p.hp >= p.maxHp && p.mana >= p.maxMana;
   const inRun = !!save.activeRun;
+  // Path-choice notification: the player has hit the choice level but
+  // hasn't picked yet. We highlight this in two places — a dot on the
+  // Trainer tile and a one-line subtitle nudging them to visit.
+  const pathChoiceAvailable =
+    p.level >= PATH_CHOICE_LEVEL[p.charClass] &&
+    p.classPaths?.[p.charClass] === undefined;
   // Mercy Cot is visible only when broke + below half HP. No cooldown by
   // design (a cooldown would re-create the soft lock we're solving).
   const mercyCap = Math.floor(p.maxHp * 0.5);
@@ -45,7 +52,24 @@ export function HubScreen({ setView }: { setView: (v: View) => void }) {
       <div className="grid sm:grid-cols-2 lg:grid-cols-5 gap-3">
         <button onClick={() => setView("dungeons")} className="glow-card text-left rounded-lg border-2 border-primary/30 p-4 bg-card/60 text-primary"><Swords className="w-6 h-6 mb-2"/><div className="font-serif">Dungeons</div><p className="text-xs text-muted-foreground">Venture into darkness.</p></button>
         <button onClick={() => setView("inventory")} className="glow-card text-left rounded-lg border-2 border-amber-500/30 p-4 bg-card/60 text-amber-400"><Backpack className="w-6 h-6 mb-2"/><div className="font-serif">Inventory</div><p className="text-xs text-muted-foreground">{p.inventory.length} unequipped · {p.consumables.reduce((a,c)=>a+c.qty,0)} potions</p></button>
-        <button onClick={() => setView("trainer")} className="glow-card text-left rounded-lg border-2 border-sky-500/30 p-4 bg-card/60 text-sky-300"><GraduationCap className="w-6 h-6 mb-2"/><div className="font-serif">Skill Trainer</div><p className="text-xs text-muted-foreground">{p.skillPoints} SP · {p.equippedSkills.length}/5 equipped</p></button>
+        <button
+          onClick={() => setView("trainer")}
+          className="glow-card text-left rounded-lg border-2 border-sky-500/30 p-4 bg-card/60 text-sky-300 relative"
+        >
+          <GraduationCap className="w-6 h-6 mb-2"/>
+          <div className="font-serif">Skill Trainer</div>
+          <p className="text-xs text-muted-foreground">{p.skillPoints} SP · {p.equippedSkills.length}/5 equipped</p>
+          {pathChoiceAvailable && (
+            <p className="text-[10px] mt-1 text-amber-300 uppercase tracking-widest">Path choice available</p>
+          )}
+          {pathChoiceAvailable && (
+            <span
+              className="absolute top-2 right-2 w-2.5 h-2.5 rounded-full bg-amber-400 ring-2 ring-amber-400/40 animate-pulse"
+              aria-label="Path choice available"
+              title="A specialization path is waiting to be chosen."
+            />
+          )}
+        </button>
         <button onClick={() => setView("forge")} className="glow-card text-left rounded-lg border-2 border-orange-500/30 p-4 bg-card/60 text-orange-400"><Hammer className="w-6 h-6 mb-2"/><div className="font-serif">The Forge</div><p className="text-xs text-muted-foreground">{p.shards} shards · {p.essence} essence</p></button>
         <button onClick={() => setView("achievements")} className="glow-card text-left rounded-lg border-2 border-yellow-400/30 p-4 bg-card/60 text-yellow-400"><Trophy className="w-6 h-6 mb-2"/><div className="font-serif">Glory</div><p className="text-xs text-muted-foreground">{p.achievements.length} unlocked</p></button>
       </div>

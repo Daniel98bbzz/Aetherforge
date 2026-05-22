@@ -1,16 +1,20 @@
 import React, { createContext, useContext, useEffect, useMemo, useState, useCallback } from "react";
 import type {
-  ActiveRun, CharClass, Consumable, GameEvent, Item, Player, QuestDef,
+  ActiveRun, CharClass, ClassPath, Consumable, GameEvent, Item, Player, QuestDef,
   QuestState, SaveData, Slot, Tier, TraderState,
 } from "./types";
-import { MAX_EQUIPPED_SKILLS, SAVE_VERSION, SKILL_RESPEC_GOLD_PER_SP, TIER_VALUE } from "./types";
+import {
+  MAX_EQUIPPED_SKILLS, PATH_CHOICE_LEVEL, PATH_RESPEC_GOLD,
+  SAVE_VERSION, SKILL_RESPEC_GOLD_PER_SP, TIER_VALUE,
+} from "./types";
 import {
   ACHIEVEMENTS, CONSUMABLES, DUNGEONS, ITEMS,
-  QUESTS, SKILL_TREE, STARTER_KITS, TRADERS,
+  PATHS, QUESTS, SKILL_TREE, STARTER_KITS, TRADERS,
 } from "./data";
 import {
   addConsumable, applyConsumable, buildRooms, computeStats,
-  consumeShield, DIFF_INDEX, findSkill, generateItem, generateTraderStock, makeQuestState,
+  consumeShield, DIFF_INDEX, findSkill, generateItem, generateTraderStock,
+  isSkillEquippableByPath, makeQuestState,
   powerScore, randInt, reconcileLevelQuests, recomputeUnlocks, recordDungeonClear,
   rollTier, shardsForTier, skillRankUpBlocker, templateIdOf, totalSpentSP,
   traderXpToNext, tryLevelUp, uid, updateQuestProgress,
@@ -94,6 +98,7 @@ function freshPlayer(name: string, charClass: CharClass, hardcore: boolean, pres
     skillPoints: 0,
     skillRanks: skills.ranks,
     equippedSkills: skills.equipped,
+    classPaths: {},
   };
   return reconcileLevelQuests(player);
 }
@@ -174,6 +179,10 @@ function migrateSave(raw: unknown): SaveData | null {
     skillPoints,
     skillRanks,
     equippedSkills,
+    // SAVE_VERSION 6: paths default to "not yet chosen". Players who are
+    // already past the choice level will get prompted at their next
+    // Trainer visit; no auto-pick (the choice is theirs).
+    classPaths: (p.classPaths && typeof p.classPaths === "object") ? { ...p.classPaths } : {},
   };
   // Seed starter quests if migrating from a save that didn't have them
   if (player.activeQuests.length === 0) {
@@ -220,6 +229,7 @@ function migrateSave(raw: unknown): SaveData | null {
       carriedLoot: Array.isArray(ar.carriedLoot) ? ar.carriedLoot : [],
       log: Array.isArray(ar.log) ? ar.log : [],
       cooldowns: Array.isArray(ar.cooldowns) ? ar.cooldowns : [],
+      oncePerRunUsed: Array.isArray(ar.oncePerRunUsed) ? ar.oncePerRunUsed : [],
     };
   }
   return {
@@ -287,6 +297,9 @@ interface GameContextValue {
   equipSkill: (skillId: string) => void;
   unequipSkill: (skillId: string) => void;
   resetSkills: () => void;
+  // paths
+  choosePath: (path: ClassPath) => void;
+  abandonPath: () => void;
   // ngp
   startNewGamePlus: () => void;
   power: number;
@@ -521,9 +534,11 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
       // rooms (see DungeonScreen.onResolve).
       carriedGold: 0, carriedXp: 0, carriedLoot: [],
       log: [`You enter ${d.name} (${diff}).`],
-      // Fresh run = fresh cooldowns. Per design: every new dungeon run
-      // begins with 0 active cooldowns regardless of how the last one ended.
+      // Fresh run = fresh cooldowns and a fresh once-per-run pool. Per design:
+      // every new dungeon run begins with 0 active cooldowns and Indomitable
+      // (or any future once-per-run skill) available again.
       cooldowns: [],
+      oncePerRunUsed: [],
     });
   }, [setActiveRun]);
 
@@ -1039,6 +1054,14 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
         queueMicrotask(() => toast.error("Unlock that skill first."));
         return p;
       }
+      const node = SKILL_TREE.find((n) => n.id === skillId);
+      if (node && !isSkillEquippableByPath(p, node)) {
+        // Defensive: this can happen if a player respec'd their path but
+        // somehow retained a path-skill rank. The equipSkill path is the
+        // last line of defense before the action bar.
+        queueMicrotask(() => toast.error("That skill belongs to a path you have not chosen."));
+        return p;
+      }
       if (p.equippedSkills.includes(skillId)) return p;
       if (p.equippedSkills.length >= MAX_EQUIPPED_SKILLS) {
         queueMicrotask(() => toast.error(`Action bar full — max ${MAX_EQUIPPED_SKILLS} skills.`));
@@ -1089,6 +1112,69 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     });
   }, [setPlayer, save?.activeRun]);
 
+  // ============ PATHS ============
+  // Lock in a path. Blocked if the player hasn't reached PATH_CHOICE_LEVEL,
+  // is mid-run, or has already chosen. The choice is reversible only via
+  // abandonPath (which is intentionally expensive).
+  const choosePath = useCallback((path: ClassPath) => {
+    setPlayer((p) => {
+      if (save?.activeRun) {
+        queueMicrotask(() => toast.error("The Trainer will not see you mid-delve."));
+        return p;
+      }
+      if (p.level < PATH_CHOICE_LEVEL[p.charClass]) {
+        queueMicrotask(() => toast.error(`Path is chosen at level ${PATH_CHOICE_LEVEL[p.charClass]}.`));
+        return p;
+      }
+      const def = PATHS.find((d) => d.id === path && d.charClass === p.charClass);
+      if (!def) {
+        queueMicrotask(() => toast.error("That path is not available to your class."));
+        return p;
+      }
+      if (p.classPaths?.[p.charClass] !== undefined) {
+        queueMicrotask(() => toast.error("You have already chosen a path. Abandon it first to switch."));
+        return p;
+      }
+      queueMicrotask(() => toast.success(`✦ You have chosen ${def.name}.`));
+      return { ...p, classPaths: { ...p.classPaths, [p.charClass]: path } };
+    });
+  }, [setPlayer, save?.activeRun]);
+
+  // Abandon path: refund every spent SP, clear ranks AND the equipped bar,
+  // pay PATH_RESPEC_GOLD on top of the standard SP-refund gold cost, and
+  // wipe classPaths[charClass]. After this the choose-path modal will be
+  // available again the next time the Trainer is opened.
+  const abandonPath = useCallback(() => {
+    setPlayer((p) => {
+      if (save?.activeRun) {
+        queueMicrotask(() => toast.error("You cannot abandon a path mid-delve."));
+        return p;
+      }
+      const current = p.classPaths?.[p.charClass];
+      if (current === undefined) {
+        queueMicrotask(() => toast.error("You have no path to abandon."));
+        return p;
+      }
+      const refundedSP = totalSpentSP(p);
+      const totalCost = refundedSP * SKILL_RESPEC_GOLD_PER_SP + PATH_RESPEC_GOLD;
+      if (p.gold < totalCost) {
+        queueMicrotask(() => toast.error(`Path respec costs ${totalCost}g. You have ${p.gold}g.`));
+        return p;
+      }
+      const newPaths = { ...p.classPaths };
+      delete newPaths[p.charClass];
+      queueMicrotask(() => toast.success(`✦ Path abandoned. ${refundedSP} SP refunded for ${totalCost}g.`));
+      return {
+        ...p,
+        gold: p.gold - totalCost,
+        skillPoints: p.skillPoints + refundedSP,
+        skillRanks: {},
+        equippedSkills: [],
+        classPaths: newPaths,
+      };
+    });
+  }, [setPlayer, save?.activeRun]);
+
   // ============ NEW GAME+ ============
   const startNewGamePlus = useCallback(() => {
     setSave((s) => {
@@ -1122,9 +1208,10 @@ export function GameProvider({ children }: { children: React.ReactNode }) {
     useConsumable, useConsumableInCombat,
     turnInQuest,
     learnOrRankUpSkill, equipSkill, unequipSkill, resetSkills,
+    choosePath, abandonPath,
     startNewGamePlus,
     power,
-  }), [save, hasSave, newGame, loadGame, resetGame, setPlayer, setActiveRun, updateActiveRun, equip, unequip, dismantle, sellItem, sellAll, upgradeItem, allocateStat, startDungeon, pushLog, endRun, unlockAchievement, claimDaily, restAtInn, restAtInnFree, innCost, canUseMercyCot, dispatchEvent, refreshTraderStock, buyItem, buyConsumable, useConsumable, useConsumableInCombat, turnInQuest, learnOrRankUpSkill, equipSkill, unequipSkill, resetSkills, startNewGamePlus, power]);
+  }), [save, hasSave, newGame, loadGame, resetGame, setPlayer, setActiveRun, updateActiveRun, equip, unequip, dismantle, sellItem, sellAll, upgradeItem, allocateStat, startDungeon, pushLog, endRun, unlockAchievement, claimDaily, restAtInn, restAtInnFree, innCost, canUseMercyCot, dispatchEvent, refreshTraderStock, buyItem, buyConsumable, useConsumable, useConsumableInCombat, turnInQuest, learnOrRankUpSkill, equipSkill, unequipSkill, resetSkills, choosePath, abandonPath, startNewGamePlus, power]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
@@ -1159,4 +1246,4 @@ export function generateLoot(dungeon: DungeonDef, diff: Difficulty, boss: boolea
 }
 
 // Re-export for use across components
-export { CONSUMABLES, TRADERS, QUESTS, SKILL_TREE } from "./data";
+export { CONSUMABLES, TRADERS, QUESTS, SKILL_TREE, PATHS } from "./data";

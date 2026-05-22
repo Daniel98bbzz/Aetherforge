@@ -1,4 +1,4 @@
-import type { Item, Monster, DungeonDef, Slot, Tier, Affix, Consumable, TraderDef, QuestDef, SkillNode } from "./types";
+import type { Item, Monster, DungeonDef, Slot, Tier, Affix, Consumable, TraderDef, QuestDef, SkillNode, PathDef } from "./types";
 
 const mkItem = (id: string, name: string, tier: Tier, slot: Slot, power: number, stats: Item["stats"], flavor: string, affixes: Affix[] = []): Item => ({
   id, name, tier, slot, power, stats, affixes, flavor,
@@ -208,7 +208,9 @@ export const STARTER_KITS: Record<string, string[]> = {
 // Prerequisites: each entry in `requires` must have rank >= 1 (i.e. unlocked,
 // not necessarily maxed). Matches the "basic heal → AOE heal" gating rule.
 export const SKILL_TREE: SkillNode[] = [
-  // ===================== WARRIOR =====================
+  // ===================== WARRIOR — BASE (path-agnostic) =====================
+  // Available to every Warrior, regardless of specialization path.
+  // Tier-based level gates: T1 = early game, T2 = mid game, T3 = late game.
   {
     id: "war_strike", charClass: "warrior", name: "Power Strike",
     description: "A heavy overhead chop that punches through guards.",
@@ -224,6 +226,7 @@ export const SKILL_TREE: SkillNode[] = [
     },
     requires: [],
     position: { tier: 1, col: 1 },
+    levelRequirementPerRank: [1, 3, 5, 8, 11],
     flavor: "The simplest answer is force.",
   },
   {
@@ -242,7 +245,27 @@ export const SKILL_TREE: SkillNode[] = [
     },
     requires: [],
     position: { tier: 1, col: 2 },
+    levelRequirementPerRank: [1, 3, 6],
     flavor: "Hold the line. Hold yourself.",
+  },
+  {
+    id: "war_battle_cry", charClass: "warrior", name: "Battle Cry",
+    description: "A bellow that sharpens your reflexes.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [1, 2, 2],
+    baseManaCost: 8, manaCostPerRank: 1,
+    cooldown: 3,
+    effect: {
+      kind: "buff_stat",
+      baseMagnitude: 8, magnitudePerRank: 4,
+      duration: 3,
+      buffKind: "buff_agi",
+    },
+    requires: [],
+    position: { tier: 1, col: 3 },
+    levelRequirementPerRank: [2, 4, 6],
+    flavor: "Loud enough to remind your hands they are still yours.",
   },
   {
     id: "war_cleave", charClass: "warrior", name: "Cleave",
@@ -259,6 +282,7 @@ export const SKILL_TREE: SkillNode[] = [
     },
     requires: ["war_strike"],
     position: { tier: 2, col: 1 },
+    levelRequirementPerRank: [4, 7, 10, 13, 16],
     flavor: "One swing, three regrets.",
   },
   {
@@ -276,7 +300,25 @@ export const SKILL_TREE: SkillNode[] = [
     },
     requires: ["war_iron_will"],
     position: { tier: 2, col: 2 },
+    levelRequirementPerRank: [4, 8, 12],
     flavor: "Bend the world around you, not the other way.",
+  },
+  {
+    id: "war_second_wind", charClass: "warrior", name: "Second Wind",
+    description: "Pause. Breathe. Knit the worst of the cuts shut.",
+    kind: "active_heal",
+    maxRank: 3,
+    rankCosts: [2, 2, 3],
+    baseManaCost: 16, manaCostPerRank: 2,
+    cooldown: 4,
+    effect: {
+      kind: "heal",
+      baseMagnitude: 0.15, magnitudePerRank: 0.05,
+    },
+    requires: [],
+    position: { tier: 2, col: 3 },
+    levelRequirementPerRank: [6, 8, 10],
+    flavor: "The soldier's first lesson: there is always one more breath.",
   },
   {
     id: "war_earthshaker", charClass: "warrior", name: "Earthshaker",
@@ -293,7 +335,302 @@ export const SKILL_TREE: SkillNode[] = [
     },
     requires: ["war_cleave"],
     position: { tier: 3, col: 1 },
+    levelRequirementPerRank: [8, 12, 16],
     flavor: "The mountain answers when you knock.",
+  },
+  {
+    id: "war_heroic_stand", charClass: "warrior", name: "Heroic Stand",
+    description: "Plant your feet. Deal more, take more. No retreating.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [3, 3, 4],
+    baseManaCost: 26, manaCostPerRank: 3,
+    cooldown: 5,
+    effect: {
+      kind: "buff_stat",
+      baseMagnitude: 12, magnitudePerRank: 5,
+      duration: 3,
+      buffKind: "buff_str",
+    },
+    requires: ["war_iron_will"],
+    position: { tier: 3, col: 2 },
+    levelRequirementPerRank: [10, 13, 16],
+    flavor: "Where you stand becomes the line.",
+  },
+
+  // ===================== WARRIOR — DARK KNIGHT PATH =====================
+  // Aggressive, selfish, lifesteal-and-self-harm. Pays HP to deal more
+  // damage and recover it via lifesteal. Pairs with crit / power / lifesteal gear.
+  {
+    id: "dk_soul_drain", charClass: "warrior", path: "dark_knight",
+    name: "Soul Drain",
+    description: "A predatory strike that pulls life from the wound.",
+    kind: "active_attack",
+    maxRank: 4,
+    rankCosts: [2, 2, 3, 3],
+    baseManaCost: 12, manaCostPerRank: 2,
+    cooldown: 0,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 1.6, magnitudePerRank: 0.2,
+      scaling: { stat: "str", basePct: 160, pctPerRank: 25 },
+      // Adds 30% lifesteal on top of any gear lifesteal at R1, scaling
+      // up by 10% per rank to 60% at R4. Sustain engine.
+      bonusLifestealPct: 30,
+    },
+    requires: [],
+    position: { tier: 1, col: 1 },
+    minLevel: 15,
+    levelRequirementPerRank: [15, 17, 19, 21],
+    flavor: "The blade was thirsty before you ever drew it.",
+  },
+  {
+    id: "dk_reckless_strike", charClass: "warrior", path: "dark_knight",
+    name: "Reckless Strike",
+    description: "Pay in blood for a savage hit. -8 HP, massive damage.",
+    kind: "active_attack",
+    maxRank: 5,
+    rankCosts: [2, 2, 3, 3, 3],
+    baseManaCost: 8, manaCostPerRank: 1,
+    cooldown: 0,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 2.2, magnitudePerRank: 0.35,
+      scaling: { stat: "str", basePct: 220, pctPerRank: 40 },
+      selfDamage: 8,
+    },
+    requires: [],
+    position: { tier: 1, col: 2 },
+    minLevel: 15,
+    levelRequirementPerRank: [15, 17, 19, 21, 23],
+    flavor: "Some men flinch from pain. You bargain with it.",
+  },
+  {
+    id: "dk_bloodthirst", charClass: "warrior", path: "dark_knight",
+    name: "Bloodthirst",
+    description: "Glass cannon: +25% STR, but you take +25% damage. 3 turns.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [2, 3, 3],
+    baseManaCost: 14, manaCostPerRank: 3,
+    cooldown: 4,
+    effect: {
+      kind: "buff_stat",
+      // Magnitude here represents +STR directly (not %).
+      baseMagnitude: 12, magnitudePerRank: 5,
+      duration: 3,
+      buffKind: "buff_str",
+    },
+    requires: ["dk_soul_drain"],
+    position: { tier: 2, col: 1 },
+    minLevel: 18,
+    levelRequirementPerRank: [18, 21, 24],
+    flavor: "Trade safety for certainty.",
+  },
+  {
+    id: "dk_demonic_pact", charClass: "warrior", path: "dark_knight",
+    name: "Demonic Pact",
+    description: "No mana cost — spends 20% of max HP for a massive blow.",
+    kind: "active_attack",
+    maxRank: 3,
+    rankCosts: [3, 3, 4],
+    baseManaCost: 0, manaCostPerRank: 0,
+    cooldown: 4,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 2.8, magnitudePerRank: 0.6,
+      scaling: { stat: "str", basePct: 280, pctPerRank: 60 },
+      selfDamagePctMaxHp: 0.20,
+    },
+    requires: ["dk_reckless_strike"],
+    position: { tier: 2, col: 2 },
+    minLevel: 19,
+    levelRequirementPerRank: [19, 22, 25],
+    flavor: "Names were exchanged. You forgot which was yours.",
+  },
+  {
+    id: "dk_carnage", charClass: "warrior", path: "dark_knight",
+    name: "Carnage",
+    description: "Brutal execution. If the hit kills, the cooldown refunds.",
+    kind: "active_attack",
+    maxRank: 3,
+    rankCosts: [4, 4, 5],
+    baseManaCost: 22, manaCostPerRank: 3,
+    cooldown: 3,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 3.8, magnitudePerRank: 0.7,
+      scaling: { stat: "str", basePct: 380, pctPerRank: 70 },
+      refundCdOnKill: true,
+    },
+    requires: ["dk_bloodthirst"],
+    position: { tier: 3, col: 1 },
+    minLevel: 22,
+    levelRequirementPerRank: [22, 25, 28],
+    flavor: "If they fall, you have not even started.",
+  },
+  {
+    id: "dk_black_aegis", charClass: "warrior", path: "dark_knight",
+    name: "Black Aegis",
+    description: "Your wounds fuel you. +18 STR for 3 turns; ignore one shield's worth of pain.",
+    kind: "active_buff",
+    maxRank: 2,
+    rankCosts: [4, 5],
+    baseManaCost: 28, manaCostPerRank: 4,
+    cooldown: 5,
+    effect: {
+      kind: "buff_stat",
+      baseMagnitude: 18, magnitudePerRank: 8,
+      duration: 3,
+      buffKind: "buff_str",
+    },
+    requires: ["dk_demonic_pact"],
+    position: { tier: 3, col: 2 },
+    minLevel: 24,
+    levelRequirementPerRank: [24, 27],
+    flavor: "What you cannot prevent, you can spend.",
+  },
+
+  // ===================== WARRIOR — GUARDIAN PATH =====================
+  // Defensive, protective, outlast-the-enemy. Pairs with VIT / shield / heal.
+  {
+    id: "gd_shield_slam", charClass: "warrior", path: "guardian",
+    name: "Shield Slam",
+    description: "STR and VIT both fuel this blow — hits like a wall.",
+    kind: "active_attack",
+    maxRank: 4,
+    rankCosts: [2, 2, 3, 3],
+    baseManaCost: 8, manaCostPerRank: 2,
+    cooldown: 0,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 1.2, magnitudePerRank: 0.2,
+      scaling: { stat: "str", basePct: 120, pctPerRank: 20 },
+      secondaryScaling: { stat: "vit", basePct: 80, pctPerRank: 20 },
+    },
+    requires: [],
+    position: { tier: 1, col: 1 },
+    minLevel: 15,
+    levelRequirementPerRank: [15, 17, 19, 21],
+    flavor: "The shield is also the sword.",
+  },
+  {
+    id: "gd_steel_skin", charClass: "warrior", path: "guardian",
+    name: "Steel Skin",
+    description: "A self-shield equal to a quarter of your max HP, scaling up.",
+    kind: "active_buff",
+    maxRank: 5,
+    rankCosts: [2, 2, 2, 3, 3],
+    baseManaCost: 10, manaCostPerRank: 2,
+    cooldown: 2,
+    effect: {
+      kind: "shield",
+      // baseMagnitude here represents *flat* absorption derived at cast
+      // time from player.maxHp (25% at R1, +5% per rank to 45% at R5).
+      // For simplicity we encode a fixed scaling baseline and let the
+      // engine compute via skillStatsAtRank — the helper returns the
+      // magnitude directly so we keep this as flat shield amount.
+      baseMagnitude: 60, magnitudePerRank: 20,
+      duration: 99,
+    },
+    requires: [],
+    position: { tier: 1, col: 2 },
+    minLevel: 15,
+    levelRequirementPerRank: [15, 17, 19, 21, 23],
+    flavor: "The skin remembers the shape of the old shield.",
+  },
+  {
+    id: "gd_provoke", charClass: "warrior", path: "guardian",
+    name: "Provoke",
+    description: "Goad the enemy. Their next strike against you deals -40% damage.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [2, 3, 3],
+    baseManaCost: 6, manaCostPerRank: 2,
+    cooldown: 1,
+    effect: {
+      // Implemented as a shield buff with magnitude scaled to a typical
+      // monster hit — keeps the mechanic in one well-tested code path
+      // (consumeShield) rather than introducing a new "%-reduction" type.
+      kind: "shield",
+      baseMagnitude: 40, magnitudePerRank: 20,
+      duration: 99,
+    },
+    requires: ["gd_shield_slam"],
+    position: { tier: 2, col: 1 },
+    minLevel: 18,
+    levelRequirementPerRank: [18, 20, 22],
+    flavor: "Eyes on me, monster. Eyes on me.",
+  },
+  {
+    id: "gd_aegis_of_light", charClass: "warrior", path: "guardian",
+    name: "Aegis of Light",
+    description: "A radiant ward that shields and heals at once.",
+    kind: "active_buff",
+    maxRank: 3,
+    rankCosts: [3, 3, 4],
+    baseManaCost: 18, manaCostPerRank: 4,
+    cooldown: 4,
+    effect: {
+      kind: "shield",
+      baseMagnitude: 80, magnitudePerRank: 40,
+      duration: 99,
+      // Heal-on-cast in addition to the shield: 10% maxHp at R1, +5%/rank.
+      bonusHealPctMaxHp: 0.10,
+    },
+    requires: ["gd_steel_skin"],
+    position: { tier: 2, col: 2 },
+    minLevel: 19,
+    levelRequirementPerRank: [19, 22, 25],
+    flavor: "Light, then water, then a held breath.",
+  },
+  {
+    id: "gd_indomitable", charClass: "warrior", path: "guardian",
+    name: "Indomitable",
+    description: "Once per run: the next lethal blow leaves you at 1 HP instead.",
+    kind: "active_buff",
+    maxRank: 1,
+    rankCosts: [4],
+    baseManaCost: 24, manaCostPerRank: 0,
+    cooldown: 0,
+    effect: {
+      kind: "buff_stat",
+      baseMagnitude: 1, magnitudePerRank: 0,
+      duration: 99,
+      buffKind: "cheat_death",
+    },
+    requires: ["gd_aegis_of_light"],
+    position: { tier: 3, col: 1 },
+    minLevel: 22,
+    levelRequirementPerRank: [22],
+    oncePerRun: true,
+    flavor: "Death has been told 'not yet' before. It listens.",
+  },
+  {
+    id: "gd_sun_hammer", charClass: "warrior", path: "guardian",
+    name: "Sun Hammer",
+    description: "STR + VIT smash. +50% damage if your HP is above 80%.",
+    kind: "active_attack",
+    maxRank: 3,
+    rankCosts: [4, 4, 5],
+    baseManaCost: 26, manaCostPerRank: 3,
+    cooldown: 3,
+    effect: {
+      kind: "damage",
+      baseMagnitude: 2.0, magnitudePerRank: 0.4,
+      scaling: { stat: "str", basePct: 200, pctPerRank: 40 },
+      secondaryScaling: { stat: "vit", basePct: 200, pctPerRank: 40 },
+      conditionalDamageBonus: {
+        when: "self_hp_above",
+        threshold: 0.80,
+        bonusPct: 50,
+      },
+    },
+    requires: ["gd_provoke"],
+    position: { tier: 3, col: 2 },
+    minLevel: 22,
+    levelRequirementPerRank: [22, 25, 28],
+    flavor: "Hammer raised at dawn. The dawn agrees with you.",
   },
 
   // ===================== RANGER =====================
@@ -467,6 +804,55 @@ export const SKILL_TREE: SkillNode[] = [
     requires: ["sor_starfall"],
     position: { tier: 3, col: 1 },
     flavor: "The first sentence of an ending.",
+  },
+];
+
+// ============ CLASS PATHS ============
+// Metadata for class specializations. Only Warrior has paths in this round;
+// add Ranger/Sorcerer entries here when those classes' trees are expanded.
+// The `identity` line is what shows in the Trainer's pitch cards; strengths
+// and weaknesses are bullet lists in the same card so the player can compare
+// them side-by-side before committing.
+export const PATHS: PathDef[] = [
+  {
+    id: "dark_knight",
+    charClass: "warrior",
+    name: "Path of the Dark Knight",
+    tagline: "Bleed first. Live second. Win finally.",
+    description:
+      "A pact written in your own blood. Each strike trades safety for ruin — and the wound becomes the well you drink from.",
+    identity: "Aggressive · Selfish · High-damage",
+    strengths: [
+      "Lifesteal-based sustain — Soul Drain keeps you topped up mid-fight.",
+      "Highest single-target damage in the Warrior tree.",
+      "Carnage refunds its cooldown on execution kills.",
+    ],
+    weaknesses: [
+      "Many skills cost HP — chip damage compounds fast.",
+      "No reliable defensive options outside Black Aegis.",
+      "Bloodthirst leaves you brittle if the kill doesn't land.",
+    ],
+    color: "#a21caf",
+  },
+  {
+    id: "guardian",
+    charClass: "warrior",
+    name: "Path of the Guardian",
+    tagline: "Stand between them and the dawn.",
+    description:
+      "The shield is the answer. So is the second shield. And the third. Outlast everything that swings at you, and one day you will outlast death itself.",
+    identity: "Defensive · Protective · Sustain",
+    strengths: [
+      "Massive damage reduction — Steel Skin + Aegis stack absurd survival.",
+      "Indomitable: once-per-run cheat-death insurance for boss runs.",
+      "Sun Hammer rewards staying healthy with +50% damage.",
+    ],
+    weaknesses: [
+      "Slow kill speed — long boss fights are the norm.",
+      "Mana-hungry (lots of buffs cost full mana bars).",
+      "Self-damage Warrior gear is mostly wasted on Guardians.",
+    ],
+    color: "#0ea5e9",
   },
 ];
 
